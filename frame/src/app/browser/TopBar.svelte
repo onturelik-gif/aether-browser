@@ -57,6 +57,89 @@
   let activeId = $derived(tabs.activeId());
   let activeTab = $derived(tabs.activeTab());
   let headerEl = $state<HTMLElement>();
+  let bookmarksEl = $state<HTMLElement>();
+
+  // Horizontal drag-to-reorder for bookmarks in the TopBar bookmarks row.
+  let bmDrag = $state<{
+    id: string;
+    startX: number;
+    startY: number;
+    x: number;
+    y: number;
+    active: boolean;
+    dropBefore: string | null;
+    dropAtEnd: boolean;
+  } | null>(null);
+  let bmSwallowClick = false;
+
+  function computeBookmarkDrop(clientX: number, draggedId: string): { before: string | null; atEnd: boolean } {
+    if (!bookmarksEl) return { before: null, atEnd: false };
+    const items = Array.from(
+      bookmarksEl.querySelectorAll<HTMLElement>("[data-bookmark-item]"),
+    );
+    for (const el of items) {
+      const id = el.dataset.bookmarkItem;
+      if (!id || id === draggedId) continue;
+      const r = el.getBoundingClientRect();
+      if (clientX < r.left + r.width / 2) {
+        return { before: id, atEnd: false };
+      }
+    }
+    return { before: null, atEnd: true };
+  }
+
+  function handleBookmarkPointerDown(e: PointerEvent, id: string) {
+    if (e.button !== 0) return;
+    (e.currentTarget as HTMLElement)?.setPointerCapture?.(e.pointerId);
+    bmDrag = {
+      id,
+      startX: e.clientX,
+      startY: e.clientY,
+      x: e.clientX,
+      y: e.clientY,
+      active: false,
+      dropBefore: null,
+      dropAtEnd: false,
+    };
+  }
+
+  function handleBookmarkPointerMove(e: PointerEvent) {
+    if (!bmDrag) return;
+    const dx = e.clientX - bmDrag.startX;
+    const dy = e.clientY - bmDrag.startY;
+    if (!bmDrag.active && Math.hypot(dx, dy) < 6) return;
+    const target = computeBookmarkDrop(e.clientX, bmDrag.id);
+    bmDrag = {
+      ...bmDrag,
+      active: true,
+      x: e.clientX,
+      y: e.clientY,
+      dropBefore: target.before,
+      dropAtEnd: target.atEnd,
+    };
+  }
+
+  function handleBookmarkPointerUp(e: PointerEvent) {
+    if (!bmDrag) return;
+    const cur = bmDrag;
+    bmDrag = null;
+    if (!cur.active) return;
+    bmSwallowClick = true;
+    setTimeout(() => {
+      bmSwallowClick = false;
+    }, 0);
+    const barBottom = headerEl?.getBoundingClientRect().bottom ?? 108;
+    if (e.clientY > barBottom + 12) {
+      tabs.dropTab(cur.id, e.clientX, e.clientY);
+      return;
+    }
+    const target = computeBookmarkDrop(e.clientX, cur.id);
+    void tabDrag.move(cur.id, true, target.before);
+  }
+
+  function handleBookmarkPointerCancel() {
+    bmDrag = null;
+  }
 
   const drag = new RowDrag({
     list: () => undefined,
@@ -116,6 +199,7 @@
   let pinnedIds = $derived(new Set(pinnedTabs.map((t) => t.id)));
 
   function openBookmarkInCurrent(tab: TabView) {
+    if (bmSwallowClick) return;
     const url = tab.url;
     if (!url) {
       onSelect(tab.id);
@@ -377,31 +461,43 @@
     </div>
   </div>
 
-  <!-- Row 3: Classic Bookmarks / Favorites Bar (drop tabs here to pin; click=current tab, middle-click=new tab) -->
+  <!-- Row 3: Classic Bookmarks / Favorites Bar (drop tabs here to pin; drag to reorder; click=current tab, middle-click=new tab) -->
   <div
+    bind:this={bookmarksEl}
     class="topbar-bookmarks-row"
     aria-label="Sık Kullanılanlar"
     data-essentials-drop
     data-over={tabDrag.overEssentials()}
+    data-drop-end={(bmDrag?.active && bmDrag.dropAtEnd) || undefined}
   >
     {#if pinnedTabs.length === 0}
       <span class="topbar-bookmarks-empty">Sık kullanılanlara eklemek için bir sekmeyi buraya sürükle</span>
     {:else}
       {#each pinnedTabs as tab (tab.id)}
         {@const active = tab.id === activeId}
+        {@const draggingThis = bmDrag?.active && bmDrag.id === tab.id}
+        {@const dropBeforeThis = bmDrag?.active && bmDrag.dropBefore === tab.id}
         <button
           type="button"
           class="topbar-bookmark-item"
+          data-bookmark-item={tab.id}
           data-active={active || undefined}
+          data-dragging={draggingThis || undefined}
+          data-drop-before={dropBeforeThis || undefined}
           data-zephium-tab-id={tab.id}
           data-zephium-tab-url={tab.url ?? ""}
           data-zephium-projection-revision={tab.projection_revision}
           title={tab.title || tab.url || m.untitled_tab()}
           onclick={() => openBookmarkInCurrent(tab)}
+          onpointerdown={(e) => handleBookmarkPointerDown(e, tab.id)}
+          onpointermove={handleBookmarkPointerMove}
+          onpointerup={handleBookmarkPointerUp}
+          onpointercancel={handleBookmarkPointerCancel}
           onmousedown={handleBookmarkMouseDown}
           onmouseup={(e) => handleBookmarkMouseUp(e, tab)}
           oncontextmenu={(e) => {
             e.preventDefault();
+            bmDrag = null;
             tabs.openTabMenu(tab.id, e.clientX, e.clientY);
           }}
         >
@@ -428,6 +524,15 @@
     image={favicons.image(held?.icon)}
     tone={favicons.tone(held?.icon)}
     title={held?.title}
+  />
+{:else if bmDrag?.active}
+  {@const held = pinnedTabs.find((tab) => tab.id === bmDrag?.id)}
+  <DragMark
+    x={bmDrag.x}
+    y={bmDrag.y}
+    image={favicons.image(held?.icon)}
+    tone={favicons.tone(held?.icon)}
+    title=""
   />
 {/if}
 
@@ -742,6 +847,23 @@
   .topbar-bookmark-item[data-active] {
     background: var(--row-active, rgba(255, 255, 255, 0.11));
     color: var(--color-text);
+  }
+
+  .topbar-bookmark-item[data-dragging] {
+    opacity: 0.35;
+  }
+
+  .topbar-bookmark-item[data-drop-before] {
+    box-shadow: inset 2px 0 0 #38bdf8;
+  }
+
+  .topbar-bookmarks-row[data-drop-end]::after {
+    content: "";
+    flex: none;
+    width: 2px;
+    height: 16px;
+    border-radius: 2px;
+    background: #38bdf8;
   }
 
   .topbar-bookmark-label {
