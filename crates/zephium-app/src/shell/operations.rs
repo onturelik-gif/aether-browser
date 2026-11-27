@@ -1090,18 +1090,46 @@ impl Shell {
             }
             return operation_result(OperationOutcome::Applied, OperationReason::MutationApplied);
         }
-        if id == "topbar.popover=on" || id == "topbar.popover=off" {
-            let extra = if id == "topbar.popover=on" { 260.0 } else { 0.0 };
+        if let Some(arg) = id.strip_prefix("topbar.popover=") {
             if let Some(win) = self.windows.focused_mut() {
-                if win.mode == zephium_core::layout::Mode::TopBar
-                    && (win.metrics.caption - extra).abs() > 0.5
-                {
-                    win.metrics.caption = extra;
-                    if win.metrics.sidebar_hidden {
-                        let _ = self.relayout_with(false);
-                        self.refresh_sidebar_peek();
+                if win.mode == zephium_core::layout::Mode::TopBar {
+                    let win_id = win.id;
+                    let hidden = win.metrics.sidebar_hidden;
+                    if arg == "off" {
+                        if hidden {
+                            if win.metrics.caption != 0.0 {
+                                win.metrics.caption = 0.0;
+                                let _ = self.relayout_with(false);
+                                self.refresh_sidebar_peek();
+                            }
+                        } else {
+                            let _ = self.engine.raise_chrome(
+                                win_id,
+                                false,
+                                Rect::new(0.0, 0.0, 1.0, 1.0),
+                                false,
+                            );
+                        }
+                    } else if hidden {
+                        if (win.metrics.caption - 280.0).abs() > 0.5 {
+                            win.metrics.caption = 280.0;
+                            let _ = self.relayout_with(false);
+                            self.refresh_sidebar_peek();
+                        }
                     } else {
-                        let _ = self.relayout_with(true);
+                        let nums: Vec<f64> = arg
+                            .split(',')
+                            .filter_map(|s| s.trim().parse::<f64>().ok())
+                            .collect();
+                        if nums.len() == 4 {
+                            let rect = Rect::new(
+                                nums[0].max(0.0),
+                                nums[1].max(0.0),
+                                nums[2].max(16.0),
+                                nums[3].max(16.0),
+                            );
+                            let _ = self.engine.raise_chrome(win_id, true, rect, false);
+                        }
                     }
                 }
             }

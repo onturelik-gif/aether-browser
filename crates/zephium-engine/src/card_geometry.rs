@@ -22,9 +22,7 @@ pub(crate) fn card_pixels(card: Rect, client: (i32, i32), scale: f64) -> Option<
     let x = (card.x * scale).round() as i32;
     let y = (card.y * scale).round() as i32;
     let width = ((card.width * scale).round() as i32).min(client.0 - x);
-    let is_top_card =
-        card.height > 0.0 && card.width > card.height && card.width >= (client.0 as f64 / scale) - 3.0 * card.x;
-    let height = if is_top_card {
+    let height = if card.height > 0.0 && card.height < (client.1 as f64 / scale) - 2.0 * card.y {
         ((card.height * scale).round() as i32).min(client.1 - y)
     } else {
         client.1 - 2 * y

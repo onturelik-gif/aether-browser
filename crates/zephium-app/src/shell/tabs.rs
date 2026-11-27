@@ -104,7 +104,7 @@ impl Default for TabPreferences {
             archive_after: ArchiveAfter::default(),
             after_close: AfterClose::default(),
             switch_to_open: true,
-            automatic_pip: true,
+            automatic_pip: false,
             start_with_new_tab: true,
             start_with_pages: false,
             startup_pages: Vec::new(),

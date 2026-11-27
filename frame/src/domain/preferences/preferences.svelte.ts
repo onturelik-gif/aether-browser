@@ -37,7 +37,7 @@ const defaults = {
   "tabs.new-position": "end",
   "tabs.after-close": "next",
   "tabs.switch-to-open": "true",
-  "tabs.automatic-pip": "true",
+  "tabs.automatic-pip": "false",
   "tabs.startup": "new-tab",
   "tabs.startup-pages": "",
   "tabs.home": "",

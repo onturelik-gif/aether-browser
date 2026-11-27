@@ -928,7 +928,9 @@ pub fn topbar_watch(window: &WebviewWindow, top: bool) {
     let owner = window.clone();
     let _ = window.run_on_main_thread(move || {
         sidebar_edge::set_top_mode(&owner, top);
-        if !top {
+        if top {
+            sidebar_edge::watch(&owner, true);
+        } else {
             HIDDEN_SIDEBARS.with(|windows| {
                 windows.borrow_mut().remove(owner.label());
             });

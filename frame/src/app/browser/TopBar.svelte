@@ -21,7 +21,6 @@
   import { preferences } from "$domain/preferences";
   import { updates } from "$domain/updates";
   import { commands } from "$shared/ipc/bindings";
-  import { events } from "$shared/ipc/native-events";
   import { reducedMotion } from "$shared/lib/motion";
   import { duration } from "$shared/lib/motion";
   import { AddressField, SiteDetails, SiteHead } from "$features/address";
@@ -377,20 +376,33 @@
 
   $effect(() => {
     const anyPopover = extOpen || utilityOpen;
-    void commands.runCommand(anyPopover ? "topbar.popover=on" : "topbar.popover=off").catch(() => {});
+    if (!anyPopover) {
+      void commands.runCommand("topbar.popover=off").catch(() => {});
+    } else {
+      requestAnimationFrame(() => {
+        const panel = headerEl?.querySelector<HTMLElement>('.ui-disclosure-panel[data-open="true"]');
+        const r = panel?.getBoundingClientRect();
+        const cmd =
+          r && r.width > 10 && r.height > 10
+            ? `topbar.popover=${Math.max(0, Math.round(r.left - 8))},${Math.max(0, Math.round(r.top - 8))},${Math.round(r.width + 16)},${Math.round(r.height + 16)}`
+            : `topbar.popover=${Math.max(0, Math.round(window.innerWidth - 330))},64,316,300`;
+        void commands.runCommand(cmd).catch(() => {});
+      });
+    }
     if (!away) return;
     if (anyPopover) untrack(() => peek());
     else if (peeking && !pointerIn && !atEdge && !overCard) untrack(() => release());
   });
 
   onMount(() => {
-    const unlisten = events.on<{ near?: boolean; over?: boolean }>("zephium:topbar-edge", (detail) => {
-      atEdge = detail?.near === true;
-      overCard = detail?.over === true;
+    const onTopEdge = (event: Event) => {
+      if (!(event instanceof CustomEvent) || typeof event.detail?.near !== "boolean") return;
+      atEdge = event.detail.near;
+      overCard = event.detail.over === true;
       if (!away) return;
       if (atEdge) peek();
       else if (peeking && !pointerIn && !overCard) release();
-    });
+    };
     const onBlur = () => {
       pointerIn = false;
       atEdge = false;
@@ -401,10 +413,11 @@
       pointerIn = false;
       if (away && peeking) release();
     };
+    window.addEventListener("zephium:topbar-edge", onTopEdge);
     window.addEventListener("blur", onBlur);
     document.documentElement.addEventListener("mouseleave", onLeaveDoc);
     return () => {
-      unlisten();
+      window.removeEventListener("zephium:topbar-edge", onTopEdge);
       window.removeEventListener("blur", onBlur);
       document.documentElement.removeEventListener("mouseleave", onLeaveDoc);
     };

@@ -1,13 +1,13 @@
 {
   "onboarding": {
     "onboarding": {
-      "js": 248215,
+      "js": 248216,
       "css": 127832
     }
   },
   "browser-panel-mini": {
     "browser": {
-      "js": 566572,
+      "js": 567085,
       "css": 175844
     },
     "lazy:app/browser/WorkWorkspace.svelte": {
@@ -463,11 +463,11 @@
       "css": 2750
     },
     "mini": {
-      "js": 210962,
+      "js": 210963,
       "css": 49526
     },
     "panel": {
-      "js": 136530,
+      "js": 136531,
       "css": 54281
     }
   }

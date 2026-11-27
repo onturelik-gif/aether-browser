@@ -168,8 +168,7 @@ fn top_bar(win: Size, m: Metrics, content_present: bool) -> Layout {
             content: Some(content),
         };
     }
-    let popover_h = m.caption.max(0.0);
-    let top_h = p + TOP_BAR_HEIGHT + popover_h;
+    let top_h = p + TOP_BAR_HEIGHT;
     let chrome = Rect::new(0.0, 0.0, win.width, top_h);
     let content_y = top_h + m.gap;
     let content = Rect::new(
