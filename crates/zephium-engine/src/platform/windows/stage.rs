@@ -1808,8 +1808,15 @@ fn settle_card(state: &Rc<RefCell<State>>) {
     else {
         return;
     };
-    let travel = ((card.width + CARD_AWAY) * scale * away).round() as i32;
-    let rect = (placed.0 - travel, placed.1, placed.2, placed.3);
+    let is_top_card = card.width > card.height
+        && card.width >= (client.right as f64 / scale) - 3.0 * card.x;
+    let rect = if is_top_card {
+        let travel = ((card.height + CARD_AWAY) * scale * away).round() as i32;
+        (placed.0, placed.1 - travel, placed.2, placed.3)
+    } else {
+        let travel = ((card.width + CARD_AWAY) * scale * away).round() as i32;
+        (placed.0 - travel, placed.1, placed.2, placed.3)
+    };
     let chrome = match chrome.filter(|chrome| super::sidebar_card::is_live(*chrome)) {
         Some(chrome) => chrome,
         None => {

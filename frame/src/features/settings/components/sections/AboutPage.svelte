@@ -13,7 +13,7 @@
   import Button from "$shared/ui/Button";
   import ZephiumTile from "$shared/ui/ZephiumTile";
   import AboutLinks from "../about/AboutLinks.svelte";
-  import { WEBSITE } from "../../lib/links";
+  import { RELEASES } from "../../lib/links";
   import { fields } from "../../lib/catalog";
   import PreferenceSwitch from "../PreferenceSwitch.svelte";
 
@@ -186,7 +186,7 @@
         <Button size="compact" onclick={() => void updates.check()}>{m.update_check_now()}</Button>
         <Button
           size="compact"
-          onclick={() => void commands.browserOpenUrl(WEBSITE, true).catch(() => {})}
+          onclick={() => void commands.browserOpenUrl(RELEASES, true).catch(() => {})}
           >{m.update_download_latest()}</Button
         >
       </div>

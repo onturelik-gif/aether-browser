@@ -17,7 +17,7 @@ import { runtime } from "$domain/runtime";
 import * as notices from "./notices.svelte";
 import type { UpdateCard, UpdatePill } from "./select";
 
-const REPORT_URL = "https://github.com/zephium-browser/Zephium/issues/new?template=bug_report.yml";
+const REPORT_URL = "https://github.com/onturelik-gif/aether-browser/issues/new";
 
 export type CardView = {
   key: string;

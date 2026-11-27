@@ -4217,6 +4217,14 @@ fn execute_command_or(
     if shutdown_started(app) {
         return rejected_operation();
     }
+    if id == "topbar.watch=on" || id == "topbar.watch=off" {
+        let top = id == "topbar.watch=on";
+        #[cfg(target_os = "windows")]
+        if let Some(window) = app.get_webview_window("main") {
+            platform::imp::topbar_watch(&window, top);
+        }
+        return accepted_ui_operation();
+    }
     if id.starts_with("bgToast.y=")
         || id.starts_with("dragGhost.")
         || id.starts_with("bookmark.")

@@ -18,9 +18,9 @@ const ISSUES: &str = "help.issues";
 
 pub(crate) fn url(id: &str) -> Option<&'static str> {
     match id {
-        DOCS => None,
-        RELEASES => None,
-        ISSUES => None,
+        DOCS => Some("https://github.com/onturelik-gif/aether-browser#readme"),
+        RELEASES => Some("https://github.com/onturelik-gif/aether-browser/releases"),
+        ISSUES => Some("https://github.com/onturelik-gif/aether-browser/issues"),
         _ => None,
     }
 }

@@ -13,14 +13,22 @@ pub(crate) type PixelRect = (i32, i32, i32, i32);
 pub(crate) fn card_pixels(card: Rect, client: (i32, i32), scale: f64) -> Option<PixelRect> {
     if !scale.is_finite()
         || scale <= 0.0
-        || ![card.x, card.y, card.width].iter().all(|v| v.is_finite())
+        || ![card.x, card.y, card.width, card.height]
+            .iter()
+            .all(|v| v.is_finite())
     {
         return None;
     }
     let x = (card.x * scale).round() as i32;
     let y = (card.y * scale).round() as i32;
     let width = ((card.width * scale).round() as i32).min(client.0 - x);
-    let height = client.1 - 2 * y;
+    let is_top_card =
+        card.height > 0.0 && card.width > card.height && card.width >= (client.0 as f64 / scale) - 3.0 * card.x;
+    let height = if is_top_card {
+        ((card.height * scale).round() as i32).min(client.1 - y)
+    } else {
+        client.1 - 2 * y
+    };
     (x >= 0 && y >= 0 && width > 0 && height > 0).then_some((x, y, width, height))
 }
 

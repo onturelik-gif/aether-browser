@@ -7,8 +7,8 @@
   },
   "browser-panel-mini": {
     "browser": {
-      "js": 565065,
-      "css": 175713
+      "js": 566572,
+      "css": 175844
     },
     "lazy:app/browser/WorkWorkspace.svelte": {
       "js": 43787,
@@ -139,7 +139,7 @@
       "css": 944
     },
     "lazy:features/settings/components/sections/AboutPage.svelte": {
-      "js": 22033,
+      "js": 21943,
       "css": 2383
     },
     "lazy:features/settings/components/sections/AccountPage.svelte": {
@@ -303,11 +303,11 @@
       "css": 369
     },
     "lazy:features/updates/components/UpdateCards.svelte": {
-      "js": 13443,
+      "js": 13424,
       "css": 4707
     },
     "lazy:features/updates/components/UpdateGlyph.svelte": {
-      "js": 10643,
+      "js": 10624,
       "css": 1816
     },
     "lazy:features/webext/components/WebExtensionManager.svelte": {

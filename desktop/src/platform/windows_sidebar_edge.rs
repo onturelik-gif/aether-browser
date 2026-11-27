@@ -19,7 +19,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use super::pointer;
 use crate::edge_reach::at_edge;
-use zephium_core::layout::HIDDEN_CARD_INSET;
+use zephium_core::layout::{HIDDEN_CARD_INSET, TOP_BAR_HEIGHT};
 
 struct Edge {
     window: WebviewWindow,
@@ -33,6 +33,15 @@ thread_local! {
     static EDGES: RefCell<Vec<Edge>> = const { RefCell::new(Vec::new()) };
     /// Each window's column width, which the card stands round.
     static WIDTHS: RefCell<HashMap<String, f64>> = RefCell::new(HashMap::new());
+    /// Windows watching the top edge (TopBar auto-hide) instead of the left edge.
+    static TOP_MODE: RefCell<HashMap<String, bool>> = RefCell::new(HashMap::new());
+}
+
+/// Switches whether `window` watches its top edge (TopBar) or left edge (Sidebar).
+pub fn set_top_mode(window: &WebviewWindow, top: bool) {
+    TOP_MODE.with(|modes| {
+        modes.borrow_mut().insert(window.label().to_owned(), top);
+    });
 }
 
 /// The column is this wide, wherever it stands. Runs on the UI thread.
@@ -80,17 +89,24 @@ fn moved(_: HWND) {
         // SAFETY: a plain query of a handle value.
         edges.retain(|edge| unsafe { IsWindow(Some(edge.hwnd)) }.as_bool());
         for edge in edges.iter_mut() {
-            let x = cursor
+            let top_mode = TOP_MODE
+                .with(|modes| modes.borrow().get(edge.window.label()).copied().unwrap_or(false));
+            let pos = cursor
                 .filter(|_| is_front(edge.hwnd, front))
-                .and_then(|cursor| local_x(edge.hwnd, cursor));
-            let (near, over) = match x {
-                Some(x) => {
-                    let step = edge.last.map_or(0.0, |last| x - last);
-                    edge.last = Some(x);
-                    let card = WIDTHS
-                        .with(|widths| widths.borrow().get(edge.window.label()).copied())
-                        .map_or(0.0, |width| width + 3.0 * HIDDEN_CARD_INSET);
-                    (at_edge(x, step, edge.near), x <= card)
+                .and_then(|cursor| local_pos(edge.hwnd, cursor));
+            let coord = pos.map(|(x, y)| if top_mode { y } else { x });
+            let (near, over) = match coord {
+                Some(v) => {
+                    let step = edge.last.map_or(0.0, |last| v - last);
+                    edge.last = Some(v);
+                    let card = if top_mode {
+                        TOP_BAR_HEIGHT + 3.0 * HIDDEN_CARD_INSET
+                    } else {
+                        WIDTHS
+                            .with(|widths| widths.borrow().get(edge.window.label()).copied())
+                            .map_or(0.0, |width| width + 3.0 * HIDDEN_CARD_INSET)
+                    };
+                    (at_edge(v, step, edge.near), v <= card)
                 }
                 None => {
                     edge.last = None;
@@ -100,15 +116,20 @@ fn moved(_: HWND) {
             if near != edge.near || over != edge.over {
                 edge.near = near;
                 edge.over = over;
-                changes.push((edge.window.clone(), near, over));
+                changes.push((edge.window.clone(), top_mode, near, over));
             }
         }
     });
-    for (window, near, over) in changes {
+    for (window, top_mode, near, over) in changes {
+        let event = if top_mode {
+            "zephium:topbar-edge"
+        } else {
+            "zephium:sidebar-edge"
+        };
         crate::emit_to_privileged(
             window.app_handle(),
             window.label(),
-            "zephium:sidebar-edge",
+            event,
             &serde_json::json!({ "near": near, "over": over }),
         );
     }
@@ -123,9 +144,8 @@ fn is_front(window: HWND, front: HWND) -> bool {
     }
 }
 
-/// The pointer's distance from the window's left edge in DIPs, when it is
-/// over the window itself and not another one laid over it.
-fn local_x(window: HWND, cursor: POINT) -> Option<f64> {
+/// The pointer's `(x, y)` distance from the window's top-left corner in DIPs.
+fn local_pos(window: HWND, cursor: POINT) -> Option<(f64, f64)> {
     let mut at = cursor;
     let mut client = RECT::default();
     // SAFETY: plain reads of a live window's client area and DPI, and of the
@@ -139,6 +159,9 @@ fn local_x(window: HWND, cursor: POINT) -> Option<f64> {
         }
         let dpi = GetDpiForWindow(window);
         (at.x >= 0 && at.y >= 0 && at.x < client.right && at.y < client.bottom && dpi != 0)
-            .then(|| f64::from(at.x) * 96.0 / f64::from(dpi))
+            .then(|| {
+                let s = 96.0 / f64::from(dpi);
+                (f64::from(at.x) * s, f64::from(at.y) * s)
+            })
     }
 }

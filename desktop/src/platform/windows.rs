@@ -923,6 +923,19 @@ pub fn sidebar_hidden(window: &WebviewWindow, hidden: bool) {
     });
 }
 
+/// Enables or disables top-edge pointer watching for auto-hiding TopBar mode.
+pub fn topbar_watch(window: &WebviewWindow, top: bool) {
+    let owner = window.clone();
+    let _ = window.run_on_main_thread(move || {
+        sidebar_edge::set_top_mode(&owner, top);
+        if !top {
+            HIDDEN_SIDEBARS.with(|windows| {
+                windows.borrow_mut().remove(owner.label());
+            });
+        }
+    });
+}
+
 /// The column is this wide; the hidden sidebar's card stands round it.
 pub fn sidebar_column_width(window: &WebviewWindow, width: f64) {
     let owner = window.clone();
@@ -946,12 +959,13 @@ impl Chrome for ChromeAdapter {
     fn position(&self, frame: ChromeFrame) -> bool {
         let window = self.window.clone();
         let hidden = HIDDEN_SIDEBARS.with(|windows| windows.borrow().contains(self.window.label()));
+        let top_bar_frame = frame.rect.width > 500.0 && frame.rect.height < 460.0;
         let edge = if hidden {
             zephium_core::layout::hidden_card_edge(frame.rect.width)
         } else {
             frame.rect.width
         };
-        let page_left = (!frame.fill_width).then_some(frame.rect.x + edge);
+        let page_left = (!frame.fill_width && !top_bar_frame).then_some(frame.rect.x + edge);
         self.window
             .run_on_main_thread(move || caption::set_page_left(&window, page_left))
             .is_ok()

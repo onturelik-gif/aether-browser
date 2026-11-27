@@ -15,11 +15,15 @@
     VolumeOffIcon,
   } from "@hugeicons/core-free-icons";
   import { SvelteSet } from "svelte/reactivity";
+  import { onMount, untrack } from "svelte";
   import { tabs } from "$domain/tabs";
   import { favicons } from "$domain/favicons";
   import { preferences } from "$domain/preferences";
   import { updates } from "$domain/updates";
   import { commands } from "$shared/ipc/bindings";
+  import { events } from "$shared/ipc/native-events";
+  import { reducedMotion } from "$shared/lib/motion";
+  import { duration } from "$shared/lib/motion";
   import { AddressField, SiteDetails, SiteHead } from "$features/address";
   import { BlockerShield } from "$features/blocker";
   import { ExtensionsSection } from "$features/extensions";
@@ -245,44 +249,107 @@
       ? true
       : localStorage.getItem(PIN_STORAGE_KEY) !== "false",
   );
-  let topCollapsed = $state(false);
+  // Floating overlay auto-hide state machine matching Sidebar.svelte
+  let away = $derived(!topPinned && Boolean(activeTab?.url));
+  let armed = $state(false);
+  let peeking = $state(false);
+  let pointerIn = $state(false);
   let extOpen = $state(false);
   let utilityOpen = $state(false);
-  let hideTimer: ReturnType<typeof setTimeout> | null = null;
 
-  function cancelHide() {
-    if (hideTimer) {
-      clearTimeout(hideTimer);
-      hideTimer = null;
-    }
+  let chromeRaised = false;
+  let peekGeneration = 0;
+  let atEdge = false;
+  let overCard = false;
+  const CUT_TO_CARD = IS_WINDOWS;
+  const CUT_LEAD_MS = 34;
+  const SETTLE_MS = 520;
+  const LINGER_MS = 280;
+  const slides = () => !reducedMotion();
+  let opened = 0;
+  let linger: ReturnType<typeof setTimeout> | undefined;
+  let lowered: ReturnType<typeof setTimeout> | undefined;
+
+  function lowerChrome(slide = false) {
+    if (!chromeRaised) return;
+    chromeRaised = false;
+    void commands.sidebarPeek(false, false, slide);
   }
 
-  function revealTopBar() {
-    cancelHide();
-    if (topCollapsed) {
-      topCollapsed = false;
-      void commands.runCommand("topbar.expand").catch(() => {});
-    }
+  function endPeek() {
+    peekGeneration++;
+    clearTimeout(linger);
+    clearTimeout(lowered);
+    lowered = undefined;
+    lowerChrome(false);
+    peeking = false;
   }
 
-  function scheduleHideTopBar() {
-    if (topPinned) return;
-    if (extOpen || utilityOpen || drag.ghost !== null || bmDrag?.active) return;
-    if (
-      document.activeElement instanceof HTMLInputElement &&
-      headerEl?.contains(document.activeElement)
-    ) {
+  function peek() {
+    const generation = ++peekGeneration;
+    clearTimeout(linger);
+    clearTimeout(lowered);
+    lowered = undefined;
+    if (!peeking) opened = performance.now();
+    if (peeking) {
+      chromeRaised = true;
+      void commands.sidebarPeek(true, true, slides());
       return;
     }
-    // Never auto-hide on an empty New Tab page (there's no webpage beneath).
-    if (!activeTab?.url) return;
-    cancelHide();
-    hideTimer = setTimeout(() => {
-      hideTimer = null;
-      if (topPinned || extOpen || utilityOpen || drag.ghost !== null || bmDrag?.active) return;
-      topCollapsed = true;
-      void commands.runCommand("topbar.collapse").catch(() => {});
-    }, 240);
+    if (CUT_TO_CARD) {
+      peeking = true;
+      requestAnimationFrame(() =>
+        requestAnimationFrame(() => {
+          if (generation === peekGeneration && away && peeking) {
+            chromeRaised = true;
+            void commands.sidebarPeek(true, true, slides());
+          }
+        }),
+      );
+      return;
+    }
+    chromeRaised = true;
+    void commands.sidebarPeek(true, true, false).then(() =>
+      requestAnimationFrame(() => {
+        if (generation === peekGeneration && away) peeking = true;
+      }),
+    );
+  }
+
+  function needed(): boolean {
+    if (extOpen || utilityOpen || drag.ghost !== null || bmDrag?.active) return true;
+    const active = document.activeElement;
+    return (
+      document.hasFocus() &&
+      active instanceof HTMLElement &&
+      Boolean(headerEl?.contains(active)) &&
+      (active instanceof HTMLInputElement || active.matches(":focus-visible"))
+    );
+  }
+
+  function release() {
+    clearTimeout(linger);
+    const settling = Math.max(0, opened + SETTLE_MS - performance.now());
+    linger = setTimeout(
+      () => {
+        if (!away || pointerIn || atEdge || overCard || needed()) return;
+        if (CUT_TO_CARD) {
+          lowerChrome(slides());
+          lowered = setTimeout(() => {
+            peeking = false;
+            lowered = setTimeout(() => (lowered = undefined), duration("page"));
+          }, CUT_LEAD_MS);
+          return;
+        }
+        peeking = false;
+        void commands.sidebarPeek(true, false, false);
+        lowered = setTimeout(() => {
+          lowered = undefined;
+          lowerChrome(false);
+        }, duration("page"));
+      },
+      Math.max(LINGER_MS, settling),
+    );
   }
 
   function toggleTopPin() {
@@ -290,36 +357,71 @@
     try {
       localStorage.setItem(PIN_STORAGE_KEY, topPinned ? "true" : "false");
     } catch {}
-    if (topPinned) {
-      revealTopBar();
-    } else {
-      scheduleHideTopBar();
-    }
   }
 
   $effect(() => {
-    if (!activeTab?.url && topCollapsed) {
-      revealTopBar();
+    const hidden = away;
+    if (!hidden) {
+      untrack(() => {
+        armed = false;
+        endPeek();
+      });
+    } else {
+      requestAnimationFrame(() => {
+        if (away) armed = true;
+      });
     }
+    void commands.runCommand(hidden ? "topbar.watch=on" : "topbar.watch=off").catch(() => {});
+    void commands.sidebarSetHidden(hidden);
   });
 
   $effect(() => {
     const anyPopover = extOpen || utilityOpen;
     void commands.runCommand(anyPopover ? "topbar.popover=on" : "topbar.popover=off").catch(() => {});
+    if (!away) return;
+    if (anyPopover) untrack(() => peek());
+    else if (peeking && !pointerIn && !atEdge && !overCard) untrack(() => release());
+  });
+
+  onMount(() => {
+    const unlisten = events.on<{ near?: boolean; over?: boolean }>("zephium:topbar-edge", (detail) => {
+      atEdge = detail?.near === true;
+      overCard = detail?.over === true;
+      if (!away) return;
+      if (atEdge) peek();
+      else if (peeking && !pointerIn && !overCard) release();
+    });
+    const onBlur = () => {
+      pointerIn = false;
+      atEdge = false;
+      overCard = false;
+      if (away && peeking) release();
+    };
+    const onLeaveDoc = () => {
+      pointerIn = false;
+      if (away && peeking) release();
+    };
+    window.addEventListener("blur", onBlur);
+    document.documentElement.addEventListener("mouseleave", onLeaveDoc);
+    return () => {
+      unlisten();
+      window.removeEventListener("blur", onBlur);
+      document.documentElement.removeEventListener("mouseleave", onLeaveDoc);
+    };
   });
 
   $effect(() => () => {
-    cancelHide();
+    endPeek();
     void commands.runCommand("topbar.popover=off").catch(() => {});
-    if (topCollapsed) {
-      void commands.runCommand("topbar.expand").catch(() => {});
-    }
+    void commands.runCommand("topbar.watch=off").catch(() => {});
+    void commands.sidebarSetHidden(false);
   });
 
   function switchToSidebar() {
-    cancelHide();
-    topCollapsed = false;
-    void commands.runCommand("topbar.expand").catch(() => {});
+    endPeek();
+    void commands.runCommand("topbar.popover=off").catch(() => {});
+    void commands.runCommand("topbar.watch=off").catch(() => {});
+    void commands.sidebarSetHidden(false);
     void preferences.set("sidebar.mode", "default");
   }
 
@@ -391,21 +493,30 @@
   bind:this={headerEl}
   class="aether-topbar"
   data-windows={IS_WINDOWS || undefined}
-  data-collapsed={topCollapsed || undefined}
-  onpointerenter={revealTopBar}
-  onpointerleave={scheduleHideTopBar}
+  data-hidden={away || undefined}
+  data-armed={(away && armed) || undefined}
+  data-peek={(away && peeking) || undefined}
+  data-menu-material={IS_WINDOWS && away ? "opaque" : undefined}
+  onpointerenter={() => {
+    pointerIn = true;
+    clearTimeout(linger);
+  }}
+  onpointermove={() => {
+    if (!pointerIn) {
+      pointerIn = true;
+      clearTimeout(linger);
+    }
+  }}
+  onpointerleave={() => {
+    pointerIn = false;
+    if (away && peeking) release();
+  }}
+  onfocusout={(event: FocusEvent) => {
+    const next = event.relatedTarget;
+    if (!away || !peeking) return;
+    if (!(next instanceof Node) || !headerEl?.contains(next)) release();
+  }}
 >
-  {#if topCollapsed}
-    <div
-      class="topbar-hover-strip"
-      role="presentation"
-      aria-label="Üst çubuğu göster"
-      onpointerenter={revealTopBar}
-      onpointermove={revealTopBar}
-    >
-      <span class="topbar-hover-pill"></span>
-    </div>
-  {:else}
   <!-- Row 1: Classic Chrome/Edge horizontal tab strip with horizontal tab groups & drag-to-split -->
   <div class="topbar-tabs-row" data-tauri-drag-region>
     <div
@@ -619,7 +730,7 @@
             warning={page?.warning}
             onopen={() => {
               utilityOpen = true;
-              cancelHide();
+              clearTimeout(linger);
             }}
             onclose={() => {
               utilityOpen = false;
@@ -659,7 +770,7 @@
         align="end"
         onopen={() => {
           extOpen = true;
-          cancelHide();
+          clearTimeout(linger);
         }}
         onclose={() => {
           extOpen = false;
@@ -756,7 +867,6 @@
       {/each}
     {/if}
   </div>
-  {/if}
 </header>
 
 {#if drag.ghost !== null}
@@ -790,32 +900,28 @@
     user-select: none;
   }
 
-  .aether-topbar[data-collapsed] {
-    height: 12px;
-    padding: 0;
-    gap: 0;
+  .aether-topbar[data-hidden] {
+    position: fixed;
+    top: 8px;
+    inset-inline: 8px;
+    z-index: 30;
+    height: auto;
+    padding: 4px 6px 5px;
+    border-radius: var(--content-radius-windows, 12px);
+    background: var(--sidebar-card, rgba(22, 26, 36, 0.96));
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    box-shadow: var(--shadow-overlay, 0 14px 40px rgba(0, 0, 0, 0.48));
+    translate: 0 calc(-100% - 24px);
+    pointer-events: none;
   }
 
-  .topbar-hover-strip {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 100%;
-    height: 12px;
-    cursor: default;
+  .aether-topbar[data-hidden][data-armed] {
+    transition: translate var(--motion-page, 320ms) var(--ease-emphasized, cubic-bezier(0.22, 1, 0.36, 1));
   }
 
-  .topbar-hover-pill {
-    width: 48px;
-    height: 3px;
-    border-radius: 999px;
-    background: rgba(255, 255, 255, 0.22);
-    transition: background-color 140ms ease, width 140ms ease;
-  }
-
-  .topbar-hover-strip:hover .topbar-hover-pill {
-    width: 72px;
-    background: rgba(56, 189, 248, 0.7);
+  .aether-topbar[data-hidden][data-peek] {
+    translate: 0 0;
+    pointer-events: auto;
   }
 
   .topbar-ext-popup {

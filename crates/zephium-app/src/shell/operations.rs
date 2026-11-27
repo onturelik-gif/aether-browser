@@ -1096,9 +1096,13 @@ impl Shell {
                 if win.mode == zephium_core::layout::Mode::TopBar
                     && (win.metrics.caption - extra).abs() > 0.5
                 {
-                    win.metrics.sidebar_hidden = false;
                     win.metrics.caption = extra;
-                    let _ = self.relayout_with(true);
+                    if win.metrics.sidebar_hidden {
+                        let _ = self.relayout_with(false);
+                        self.refresh_sidebar_peek();
+                    } else {
+                        let _ = self.relayout_with(true);
+                    }
                 }
             }
             return operation_result(OperationOutcome::Applied, OperationReason::MutationApplied);

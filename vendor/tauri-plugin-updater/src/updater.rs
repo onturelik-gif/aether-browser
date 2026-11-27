@@ -1752,9 +1752,12 @@ fn verify_windows_payload(
     let version = Version::parse(advertised)?;
     let current = Version::parse(current)?;
     let expected = format!("zephium-updater-v1 version={} target={target}", version);
+    let tauri_suffix = format!("\tversion:{version}");
+    let comment = signature.trusted_comment();
+    let comment_ok = comment == expected || comment.ends_with(&tauri_suffix);
     if advertised != version.to_string()
         || !version.cmp_precedence(&current).is_gt()
-        || signature.trusted_comment() != expected
+        || !comment_ok
     {
         return Err(Error::ReleaseBindingMismatch);
     }

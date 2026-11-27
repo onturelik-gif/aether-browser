@@ -121,6 +121,17 @@ pub fn hidden_card(window: Size, m: Metrics) -> Rect {
     )
 }
 
+pub fn hidden_top_card(window: Size, m: Metrics) -> Rect {
+    let inset = HIDDEN_CARD_INSET;
+    let h = TOP_BAR_HEIGHT + m.caption.max(0.0) + 2.0 * inset;
+    Rect::new(
+        inset,
+        inset,
+        (window.width - 2.0 * inset).max(0.0),
+        h.min((window.height - inset).max(0.0)),
+    )
+}
+
 pub fn compute(window: Size, mode: Mode, m: Metrics, content_present: bool) -> Layout {
     match mode {
         Mode::Sidebar => sidebar(window, m, content_present),
@@ -137,13 +148,20 @@ fn top_bar(win: Size, m: Metrics, content_present: bool) -> Layout {
         };
     }
     if m.sidebar_hidden {
-        let strip_h = 12.0;
-        let chrome = Rect::new(0.0, 0.0, win.width, strip_h);
+        // Keep the webpage almost full-height beneath the floating TopBar card.
+        // Using `p + 3.0` (11.0 > 10.0) keeps Windows caption hover disabled in stage.rs.
+        let top_pad = p + 3.0;
+        let chrome = Rect::new(
+            0.0,
+            0.0,
+            win.width,
+            (p + TOP_BAR_HEIGHT + m.caption.max(0.0) + HIDDEN_SHADOW_REACH).min(win.height),
+        );
         let content = Rect::new(
             p,
-            strip_h,
+            top_pad,
             (win.width - 2.0 * p).max(0.0),
-            (win.height - strip_h - p).max(0.0),
+            (win.height - top_pad - p).max(0.0),
         );
         return Layout {
             chrome,

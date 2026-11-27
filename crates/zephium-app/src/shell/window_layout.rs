@@ -26,7 +26,11 @@ impl Shell {
             return;
         }
         let id = win.id;
-        let card = layout::hidden_card(win.size, win.metrics);
+        let card = if win.mode == layout::Mode::TopBar {
+            layout::hidden_top_card(win.size, win.metrics)
+        } else {
+            layout::hidden_card(win.size, win.metrics)
+        };
         if !peek {
             // Retire replay intent even if native cleanup is refused.
             self.windows.get_mut(id).unwrap().sidebar_peek = false;
@@ -43,7 +47,11 @@ impl Shell {
             .focused()
             .filter(|win| win.sidebar_peek && win.metrics.sidebar_hidden && self.window_visible)
         {
-            let card = layout::hidden_card(win.size, win.metrics);
+            let card = if win.mode == layout::Mode::TopBar {
+                layout::hidden_top_card(win.size, win.metrics)
+            } else {
+                layout::hidden_card(win.size, win.metrics)
+            };
             // Repeating the raised target keeps an in-flight native slide;
             // only its card geometry changes with these admitted metrics.
             let _ = self.engine.raise_chrome(win.id, true, card, true);

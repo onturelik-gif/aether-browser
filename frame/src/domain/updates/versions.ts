@@ -1,13 +1,10 @@
 import type { RuntimeSecurityAdvisory } from "$shared/ipc/bindings";
 
-const CHANGELOG = "https://zephium.app/changelog#v";
+const CHANGELOG = "https://github.com/onturelik-gif/aether-browser/releases/tag/v";
 const SEMVER = /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/u;
 
-/** The site's changelog entry for a version: its anchor is the version with
- *  dots as hyphens (1.0.0-beta.2 is v1-0-0-beta-2), and build metadata, which
- *  is not part of a release's name, left off. */
 export const releaseNotesUrl = (version: string) =>
-  `${CHANGELOG}${(version.split("+")[0] ?? "").replace(/[^0-9A-Za-z]+/gu, "-")}`;
+  `${CHANGELOG}${(version.split("+")[0] ?? "").replace(/[^0-9A-Za-z.-]+/gu, "-")}`;
 
 function comparePrerelease(a: string | undefined, b: string | undefined): number {
   if (a === b) return 0;
