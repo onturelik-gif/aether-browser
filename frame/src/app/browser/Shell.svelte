@@ -317,8 +317,11 @@
     });
   });
   let tree = $derived(sidebarTree(tabs.sidebarNodes(), tabs.tabs()));
-  let keptBeside = $derived(tree.favorites.slice(0, beside));
-  let keptAbove = $derived(tree.favorites.slice(beside));
+  let aboveCount = $derived(
+    dockColumns > 0 ? Math.floor(tree.favorites.length / dockColumns) * dockColumns : 0,
+  );
+  let keptAbove = $derived(tree.favorites.slice(0, aboveCount));
+  let keptBeside = $derived(tree.favorites.slice(aboveCount));
   // The rail shows one flat list. Folders and split grouping are shapes that
   // need labels, so they stay in the expanded body.
   let railTabs = $derived(

@@ -65,7 +65,7 @@ static INSTALL_AFTER_EXIT: Mutex<Option<(Parked, std::path::PathBuf)>> = Mutex::
 const SUPPORTED: bool = !cfg!(debug_assertions) && cfg!(any(target_os = "macos", windows));
 
 fn supported_identity(native_release: bool, identifier: &str) -> bool {
-    native_release && identifier == "app.zephium"
+    native_release && (identifier == "app.aether" || identifier == "app.zephium")
 }
 
 fn supported(app: &tauri::AppHandle) -> bool {
