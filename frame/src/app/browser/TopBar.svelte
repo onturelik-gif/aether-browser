@@ -18,6 +18,7 @@
   import { tabs } from "$domain/tabs";
   import { favicons } from "$domain/favicons";
   import { preferences } from "$domain/preferences";
+  import { updates } from "$domain/updates";
   import { commands } from "$shared/ipc/bindings";
   import { AddressField, SiteDetails, SiteHead } from "$features/address";
   import { BlockerShield } from "$features/blocker";
@@ -58,6 +59,11 @@
 
   let activeId = $derived(tabs.activeId());
   let activeTab = $derived(tabs.activeTab());
+  let updateState = $derived(updates.status());
+  let updateReady = $derived(updateState.state === "ready");
+  let updateBusy = $derived(
+    updateState.state === "installing" || updates.pendingRelaunch(),
+  );
   let headerEl = $state<HTMLElement>();
   let tabStripEl = $state<HTMLElement>();
   let bookmarksEl = $state<HTMLElement>();
@@ -621,6 +627,18 @@
     </div>
 
     <div class="topbar-nav-group">
+      {#if updateReady || updateBusy}
+        <button
+          type="button"
+          class="topbar-update-pill"
+          disabled={updateBusy}
+          title="Yeni Aether sürümünü kur ve yeniden başlat"
+          onclick={() => void updates.relaunch()}
+        >
+          <Icon icon={RefreshIcon} size={13} />
+          <span>{updateBusy ? "Güncelleniyor…" : "Güncelle"}</span>
+        </button>
+      {/if}
       <Disclosure
         label="Eklentiler"
         triggerTitle="Eklentiler"
@@ -795,6 +813,34 @@
 
   :global(.topbar-icon-btn[data-pinned]) {
     color: #38bdf8;
+  }
+
+  .topbar-update-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    height: 26px;
+    padding: 0 10px;
+    border: 1px solid rgba(52, 211, 153, 0.45);
+    border-radius: 999px;
+    background: rgba(16, 185, 129, 0.18);
+    color: #6ee7b7;
+    font-size: 11.5px;
+    font-weight: 600;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background-color 120ms ease, border-color 120ms ease;
+  }
+
+  .topbar-update-pill:hover:not(:disabled) {
+    background: rgba(16, 185, 129, 0.3);
+    border-color: rgba(52, 211, 153, 0.75);
+    color: #ecfdf5;
+  }
+
+  .topbar-update-pill:disabled {
+    opacity: 0.65;
+    cursor: default;
   }
 
   .topbar-tabs-row {

@@ -66,12 +66,13 @@
   },
   "bundle": {
     "active": true,
+    "createUpdaterArtifacts": true,
     "targets": "all",
     "publisher": "Aether",
     "copyright": "Copyright © 2026 Aether",
     "category": "Productivity",
     "shortDescription": "A fast, private browser with a built-in place to get work done.",
-    "homepage": "https://zephium.app",
+    "homepage": "https://github.com/onturelik-gif/aether-browser",
     "license": "MPL-2.0 AND CC-BY-SA-3.0 AND GPL-3.0-only",
     "resources": {
       "../LICENSE": "licenses/Zephium-MPL-2.0.txt",
@@ -111,9 +112,9 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDYwNjc0MThEQzlFNEJGMTEKUldRUnYrVEpqVUZuWUVGVDVHekNib1B5VnQzSzBxWFZnNmlHUDFiNGFyWkdOejhGc0NLT3NVSUoK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEIwNUU1QjIzMEI1NzdBRkYKUldUL2VsY0xJMXRlc0hrQXVqeksxTGxiOS9wbE1xcEhMQmpZa01zbGVzS0ppT3IxNHhDQXRYbVQK",
       "endpoints": [
-        "https://github.com/zephium-browser/Zephium/releases/latest/download/latest.json"
+        "https://github.com/onturelik-gif/aether-browser/releases/latest/download/latest.json"
       ]
     }
   }

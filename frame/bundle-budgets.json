@@ -7,8 +7,8 @@
   },
   "browser-panel-mini": {
     "browser": {
-      "js": 564307,
-      "css": 175220
+      "js": 564781,
+      "css": 175711
     },
     "lazy:app/browser/WorkWorkspace.svelte": {
       "js": 43787,
