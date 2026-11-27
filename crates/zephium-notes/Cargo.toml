@@ -1,0 +1,24 @@
+[package]
+name = "zephium-notes"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+zephium-core.workspace = true
+rusqlite.workspace = true
+tracing.workspace = true
+notify = { version = "=8.2.1", default-features = false, features = ["macos_fsevent"] }
+pulldown-cmark = { version = "=0.13.6", default-features = false }
+sha2 = "=0.10.9"
+unicode-normalization = "=0.1.26"
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "=1.1.6", features = ["fs"] }
+
+[target.'cfg(windows)'.dependencies]
+zephium-private-fs.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+tempfile.workspace = true

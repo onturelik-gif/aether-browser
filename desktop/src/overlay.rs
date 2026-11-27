@@ -1,0 +1,1302 @@
+//! A native launcher created on first use and put to sleep while hidden. It hosts search only:
+//! destinations are handed to the browser, which already has their views
+//! loaded, so nothing heavy is ever instantiated a second time here.
+pub(crate) mod geometry;
+mod idle;
+mod model;
+#[cfg(target_os = "windows")]
+mod viewport;
+use model::{Model, Owner};
+use std::sync::{Arc, Mutex};
+#[cfg(not(target_os = "macos"))]
+use tauri::PhysicalPosition;
+#[cfg(target_os = "windows")]
+use tauri::PhysicalSize;
+use tauri::{LogicalSize, Manager, WebviewWindow};
+#[cfg(target_os = "macos")]
+use zephium_core::ports::store::Store;
+use zephium_ipc::{
+    OperationDisposition, OperationOutcome, OperationReason, PanelIntent, PanelLayout, PanelOwner,
+    PanelState, SearchContext, ToolKind,
+};
+pub const PANEL_LABEL: &str = "panel";
+pub const PANEL_SIZE: (f64, f64) = (geometry::WIDTH, geometry::INITIAL_HEIGHT);
+#[cfg(target_os = "macos")]
+pub const PANEL_RADIUS: u16 = model::RADIUS;
+pub const EVENT_STATE: &str = "zephium:panel-state";
+#[derive(Default)]
+pub struct ContextCache(Mutex<Option<Owner>>);
+impl ContextCache {
+    /// A provider must match the current browser owner even before the panel exists.
+    pub fn search_private(&self, context: &SearchContext) -> Option<bool> {
+        let current = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let owner = current.as_ref()?;
+        (owner.window == context.window_id
+            && owner.profile == context.profile_id
+            && owner.space == context.space_id)
+            .then_some(owner.private)
+    }
+    /// Browser search shares the focused owner, not the launcher's window lifetime.
+    pub fn newtab_context(&self, tab_id: &str, session: u64) -> Option<SearchContext> {
+        let owner = self.0.lock().unwrap_or_else(|e| e.into_inner()).clone()?;
+        Some(SearchContext {
+            window_id: owner.window,
+            profile_id: owner.profile,
+            space_id: owner.space,
+            session_id: format!("newtab:{tab_id}:{session}"),
+            request_id: String::new(),
+        })
+    }
+}
+struct Pending {
+    id: String,
+    background: bool,
+}
+struct State {
+    model: Model,
+    pending: Option<Pending>,
+    /// Height the launcher's content asked for, before the display bounds it.
+    content_height: f64,
+    layout_revision: u64,
+    placement: Option<geometry::Placement>,
+    /// What the window was last placed for: the launcher, or the switcher
+    /// with this many cards across.
+    placed_for: Option<Option<(usize, usize, bool)>>,
+    /// How many cards stand across on the work area the window was last
+    /// placed on.
+    switcher_columns: usize,
+    pending_document: Option<tauri::Url>,
+    focus_timer: bool,
+    closed: bool,
+    suspending: bool,
+    /// DWM can discard a backdrop installed while the window was hidden, and
+    /// this one was; it is put back once, when the window first appears.
+    #[cfg(target_os = "windows")]
+    material_restored: bool,
+}
+impl State {
+    /// A new presentation never inherits an action still awaiting settlement.
+    /// A disposition that never reaches the launcher, such as one the ledger
+    /// drops as a duplicate, would otherwise refuse every later action.
+    fn begin(&mut self) {
+        self.pending = None;
+        if self.model.switcher.is_some() {
+            self.content_height = geometry::INITIAL_HEIGHT;
+        }
+        self.model.search();
+    }
+    /// Holds the launcher for one action until it settles, so a second one
+    /// cannot hide the outcome of the first.
+    fn arm(&mut self, id: &str, context: &SearchContext, background: bool) -> bool {
+        if !self.idle_for(context) {
+            return false;
+        }
+        self.model.clear_error();
+        self.pending = Some(Pending {
+            id: id.into(),
+            background,
+        });
+        true
+    }
+    /// Whether `context` is this presentation's and no action holds it.
+    fn idle_for(&self, context: &SearchContext) -> bool {
+        self.model.admits(context) && self.pending.is_none()
+    }
+    fn settle(&mut self, id: &str) -> Option<Pending> {
+        self.pending.take_if(|pending| pending.id == id)
+    }
+}
+#[derive(Clone)]
+pub struct Overlay {
+    window: WebviewWindow,
+    state: Arc<Mutex<State>>,
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    recovery_document: Option<tauri::Url>,
+}
+impl Overlay {
+    pub fn new(window: WebviewWindow, pending_document: Option<tauri::Url>) -> Self {
+        let owner = window
+            .app_handle()
+            .try_state::<ContextCache>()
+            .and_then(|cache| cache.0.lock().ok()?.clone());
+        let mut model = Model::default();
+        model.set_owner(owner);
+        // The owned window clips a stable renderer viewport on Windows. Native
+        // height changes no longer trigger a second WebView2 surface resize.
+        #[cfg(target_os = "windows")]
+        {
+            let _ = window.as_ref().set_auto_resize(false);
+            if !viewport::install(&window) {
+                crate::write_diagnostic(format_args!(
+                    "launcher: stable viewport installation failed"
+                ));
+            }
+        }
+        let this = Self {
+            window,
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            recovery_document: pending_document.clone(),
+            state: Arc::new(Mutex::new(State {
+                model,
+                pending: None,
+                content_height: geometry::INITIAL_HEIGHT,
+                layout_revision: 0,
+                placement: None,
+                placed_for: None,
+                switcher_columns: geometry::SWITCHER_COLUMNS,
+                pending_document,
+                focus_timer: false,
+                closed: false,
+                suspending: false,
+                #[cfg(target_os = "windows")]
+                material_restored: false,
+            })),
+        };
+        #[cfg(target_os = "macos")]
+        {
+            let w = this.window.clone();
+            let _ = this
+                .window
+                .run_on_main_thread(move || crate::panel::configure(&w));
+            // Live changes arrive as a UI command; this is the value at launch.
+            tauri::async_runtime::spawn_blocking(|| {
+                let reduce = crate::APP_STORE
+                    .get()
+                    .and_then(|store| store.app_setting("ui.reduce-motion"));
+                crate::panel::set_reduce_motion(reduce.as_deref() == Some("true"));
+            });
+        }
+        this
+    }
+    fn state(&self) -> std::sync::MutexGuard<'_, State> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+    fn on_main(&self, f: impl FnOnce(&Self) + Send + 'static) {
+        let this = self.clone();
+        let _ = self.window.run_on_main_thread(move || {
+            if !crate::shutdown_started(this.window.app_handle()) && !this.state().closed {
+                f(&this);
+            }
+        });
+    }
+    pub fn window_app(&self) -> &tauri::AppHandle {
+        self.window.app_handle()
+    }
+    pub fn snapshot(&self) -> PanelState {
+        self.state().model.snapshot()
+    }
+    /// A renderer acknowledgement, after its pending captures have settled.
+    pub fn idle(&self, revision: String) {
+        self.on_main(move |this| {
+            let mut state = this.state();
+            if crate::resource_close::is_closing()
+                || state.model.presented
+                || state.pending.is_some()
+                || state.suspending
+                || state.model.snapshot().revision != revision
+            {
+                return;
+            }
+            state.suspending = true;
+            drop(state);
+            let panel = this.clone();
+            idle::suspend(&this.window, move || {
+                panel.state().suspending = false;
+                if panel.snapshot().visible || crate::resource_close::is_closing() {
+                    idle::resume(&panel.window);
+                }
+            });
+        });
+    }
+    pub fn wake(&self) {
+        idle::resume(&self.window);
+    }
+    pub fn ready(&self) -> PanelState {
+        self.state().model.ready = true;
+        // Every load of the page reports here, and a page just loaded holds
+        // none of the icons it was sent before.
+        if let Some(shell) = self.window.app_handle().try_state::<zephium_app::Handle>() {
+            shell.dispatch(zephium_app::Command::PanelLoaded);
+        }
+        self.on_main(|this| this.present());
+        self.snapshot()
+    }
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    pub(crate) fn prepare_recovery(&self) -> Option<tauri::Url> {
+        let document = self.recovery_document.clone()?;
+        {
+            let mut state = self.state();
+            state.model.ready = false;
+            state.pending = None;
+            // Recovery itself loads the fixed document. A concurrent launcher
+            // intent must not start a second navigation through present().
+            state.pending_document = None;
+        }
+        self.window.hide().ok()?;
+        self.wake();
+        Some(document)
+    }
+    pub fn intent(&self, intent: PanelIntent) {
+        if let PanelIntent::Idle { revision } = intent {
+            self.idle(revision);
+            return;
+        }
+        self.on_main(move |this| {
+            crate::tab_switcher::cancel(this.window_app());
+            if crate::resource_close::is_closing() {
+                return;
+            }
+            let old = this.state().model.session();
+            match intent {
+                PanelIntent::Idle { .. } => {
+                    unreachable!("idle intents are handled before presentation")
+                }
+                PanelIntent::Search => this.state().begin(),
+                PanelIntent::Dismiss => {
+                    let editing = this.state().model.editing_tab();
+                    this.state().model.hide();
+                    this.return_from(editing);
+                }
+                PanelIntent::Open { tool } => {
+                    this.state().model.hide();
+                    this.cancel_search(old);
+                    this.present();
+                    this.raise_browser();
+                    let _ = crate::execute_command(this.window.app_handle(), destination(tool));
+                    return;
+                }
+            }
+            this.cancel_search(old);
+            this.present();
+        });
+    }
+    /// Opens on the current page's address, the way an address bar would.
+    pub fn edit(&self, tab: String, url: String, mini: bool) {
+        self.on_main(move |this| {
+            crate::tab_switcher::cancel(this.window_app());
+            if crate::resource_close::is_closing() {
+                return;
+            }
+            let old = this.state().model.session();
+            {
+                let mut state = this.state();
+                state.pending = None;
+                if state.model.switcher.is_some() {
+                    state.content_height = geometry::INITIAL_HEIGHT;
+                }
+                if mini {
+                    state.model.edit_mini(tab, url);
+                } else {
+                    state.model.edit(tab, url);
+                }
+            }
+            this.cancel_search(old);
+            this.present();
+        });
+    }
+    pub fn switcher(&self, snapshot: zephium_ipc::TabSwitcherState) {
+        self.on_main(move |this| {
+            if !crate::tab_switcher::may_present(this.window_app(), &snapshot) {
+                return;
+            }
+            let old = this.state().model.session();
+            let opening = this.state().model.switcher.as_ref().map(|s| &s.session_id)
+                != Some(&snapshot.session_id);
+            {
+                let mut state = this.state();
+                state.pending = None;
+                state.model.show_switcher(snapshot);
+                state.content_height = f64::INFINITY;
+            }
+            if opening {
+                this.cancel_search(old);
+            }
+            this.present();
+        });
+    }
+    pub fn finish_switcher(&self, session: u64, commit: bool) {
+        self.on_main(move |this| {
+            if this
+                .state()
+                .model
+                .switcher
+                .as_ref()
+                .is_some_and(|s| s.session_id == session.to_string())
+            {
+                this.state().model.hide();
+                this.present();
+                if commit {
+                    this.raise_browser();
+                }
+                #[cfg(target_os = "macos")]
+                if !commit {
+                    crate::panel::return_to_previous();
+                }
+            }
+        });
+    }
+    pub fn editing_tab(&self) -> Option<String> {
+        self.state().model.editing_tab()
+    }
+    /// Whether this presentation chooses a page for a mini window.
+    pub fn mini(&self) -> bool {
+        self.state().model.mini()
+    }
+    /// Opens to choose the address of a new mini window, or puts that away.
+    /// A private session in front keeps its own launcher: what it searches
+    /// must not leave for a regular profile's window.
+    pub fn toggle_mini(&self) {
+        self.on_main(|this| {
+            if crate::resource_close::is_closing() {
+                return;
+            }
+            let old = this.state().model.session();
+            let dismissing = {
+                let state = this.state();
+                state.model.mini() && state.model.editing_tab().is_none()
+            };
+            {
+                let mut state = this.state();
+                state.pending = None;
+                if dismissing {
+                    state.model.hide();
+                } else if state
+                    .model
+                    .owner
+                    .as_ref()
+                    .is_some_and(|owner| owner.private)
+                {
+                    state.begin();
+                } else {
+                    state.model.search_mini();
+                }
+            }
+            this.cancel_search(old);
+            this.present();
+            #[cfg(target_os = "macos")]
+            if dismissing {
+                crate::panel::return_to_previous();
+            }
+        });
+    }
+    /// Gives focus back after the launcher is put away: to the mini window
+    /// whose address it was editing, else to where it was before.
+    fn return_from(&self, editing: Option<String>) {
+        let mini =
+            editing.is_some_and(|tab| crate::mini::focus_page(self.window.app_handle(), &tab));
+        #[cfg(target_os = "macos")]
+        if mini {
+            crate::panel::forget_previous();
+        } else {
+            crate::panel::return_to_previous();
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = mini;
+    }
+    pub fn toggle(&self) {
+        self.on_main(|this| {
+            crate::tab_switcher::cancel(this.window_app());
+            if crate::resource_close::is_closing() {
+                return;
+            }
+            let old = this.state().model.session();
+            let dismissing = {
+                let state = this.state();
+                state.model.presented && state.model.switcher.is_none()
+            };
+            let editing = this.state().model.editing_tab();
+            if dismissing {
+                this.state().model.hide();
+            } else {
+                this.state().begin();
+            }
+            this.cancel_search(old);
+            this.present();
+            if dismissing {
+                this.return_from(editing);
+            }
+        });
+    }
+    #[cfg(target_os = "linux")]
+    pub fn toggle_with_activation(&self, activation_token: Option<String>, timestamp: Option<u32>) {
+        self.on_main(move |this| {
+            if crate::resource_close::is_closing() {
+                return;
+            }
+            let old = this.state().model.session();
+            if this.state().model.presented {
+                this.state().model.hide();
+            } else {
+                this.state().begin();
+            }
+            this.cancel_search(old);
+            if !this.snapshot().visible {
+                this.present();
+                return;
+            }
+            this.publish();
+            if this.state().model.ready {
+                this.place();
+                do_show_with_activation(&this.window, activation_token.as_deref(), timestamp);
+            }
+        });
+    }
+    pub fn hide(&self) {
+        self.intent(PanelIntent::Dismiss);
+    }
+    /// The launcher's content reports what it shows. The window follows its
+    /// height within the display's bounds, keeping its top edge where it is;
+    /// where native draws the shapes, they move first and a smaller window
+    /// follows once they have settled, so nothing is cut off mid-motion.
+    pub fn layout(&self, layout: PanelLayout) {
+        if self.state().model.switcher.is_some() || !layout.bounded() {
+            return;
+        }
+        self.on_main(move |this| {
+            if this.state().model.switcher.is_some() {
+                return;
+            }
+            let height = layout
+                .height
+                .clamp(geometry::RESTING_HEIGHT, geometry::MAX_HEIGHT);
+            let showing = this.snapshot().visible && visible(&this.window);
+            #[cfg(target_os = "macos")]
+            crate::panel::layout(&layout, showing);
+            let (_grows, _revision) = {
+                let mut state = this.state();
+                let grows = height > state.content_height;
+                state.content_height = height;
+                state.layout_revision = state.layout_revision.wrapping_add(1);
+                (grows, state.layout_revision)
+            };
+            if !showing {
+                return;
+            }
+            #[cfg(target_os = "windows")]
+            {
+                this.resize_windows();
+            }
+            #[cfg(not(target_os = "windows"))]
+            if _grows || !animated_shapes() {
+                this.resize();
+                return;
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                let later = this.clone();
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(SHAPES_SETTLE).await;
+                    later.on_main(move |this| {
+                        if this.state().layout_revision == _revision {
+                            this.resize();
+                        }
+                    });
+                });
+            }
+        });
+    }
+    /// Onboarding steps its drawn launcher aside while the real one is up.
+    /// The browser hears only that the launcher came or went, never what
+    /// it holds.
+    fn tell_browser(&self, event: &'static str) {
+        crate::emit_to_privileged(
+            self.window.app_handle(),
+            crate::MAIN_LABEL,
+            crate::EVENT_UI,
+            &event,
+        );
+    }
+    fn raise_browser(&self) {
+        #[cfg(target_os = "macos")]
+        crate::panel::forget_previous();
+        let Some(main) = self
+            .window
+            .app_handle()
+            .get_webview_window(crate::MAIN_LABEL)
+        else {
+            return;
+        };
+        #[cfg(target_os = "macos")]
+        crate::panel::raise(&main);
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = main.unminimize();
+            let _ = main.show();
+            let _ = main.set_focus();
+        }
+    }
+    fn cancel_search(&self, session_id: String) {
+        if let Some(shell) = self.window.app_handle().try_state::<zephium_app::Handle>() {
+            crate::search_providers::cancel(&session_id);
+            shell.dispatch(zephium_app::Command::CancelSearch { session_id });
+        }
+    }
+    fn publish(&self) {
+        crate::emit_to_privileged(
+            self.window.app_handle(),
+            PANEL_LABEL,
+            EVENT_STATE,
+            &self.snapshot(),
+        );
+    }
+    fn present(&self) {
+        let snapshot = self.snapshot();
+        if let Some(switcher) = &snapshot.switcher {
+            if !crate::tab_switcher::may_present(self.window_app(), switcher) {
+                return;
+            }
+        }
+        let (ready, document) = {
+            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            let document = if snapshot.visible && !state.model.ready {
+                state.pending_document.take()
+            } else {
+                None
+            };
+            (state.model.ready, document)
+        };
+        // First use creates and hardens the native panel at about:blank. Loading an unused second application graph at
+        // startup competes with the main surface and retains renderer state.
+        // The authoritative model keeps the latest route/owner while loading;
+        // panel_ready returns that snapshot before the first native reveal.
+        if let Some(document) = document {
+            if let Err(error) = self.window.navigate(document) {
+                crate::request_startup_failure(
+                    self.window.app_handle(),
+                    format_args!("could not load trusted panel document: {error}"),
+                );
+            }
+        }
+        if !ready {
+            return;
+        }
+        if snapshot.visible {
+            self.wake();
+        }
+        self.publish();
+        if !snapshot.visible {
+            if shown(&self.window) {
+                self.tell_browser("launcher.dismissed");
+            }
+            do_hide(&self.window);
+            return;
+        }
+        // On macOS the window stays up through its fade-out, so a launcher
+        // called back inside it arrives without ever having been ordered out.
+        let arriving = !shown(&self.window);
+        let columns = self.state().switcher_columns;
+        let placing = snapshot
+            .switcher
+            .as_ref()
+            .map(|s| geometry::switcher_grid(s.entries.len(), columns));
+        if !visible(&self.window) || self.state().placed_for != Some(placing) {
+            self.place();
+            self.state().placed_for = Some(placing);
+        }
+        // The switcher stands on one plate of its own; the launcher's shapes
+        // come back when it lays itself out again.
+        #[cfg(target_os = "macos")]
+        crate::panel::hold(snapshot.switcher.as_ref().map(|s| {
+            let (width, height) =
+                geometry::switcher_size(s.entries.len(), self.state().switcher_columns);
+            let inset = if animated_shapes() {
+                geometry::SHAPE_INSET
+            } else {
+                0.0
+            };
+            zephium_ipc::PanelRect {
+                x: inset,
+                y: inset,
+                width,
+                height,
+            }
+        }));
+        if arriving {
+            self.tell_browser("launcher.presented");
+        }
+        #[cfg(target_os = "macos")]
+        crate::panel::show(&self.window);
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = self.window.show();
+            let _ = self.window.set_focus();
+        }
+        #[cfg(target_os = "windows")]
+        self.restore_material();
+    }
+    #[cfg(target_os = "windows")]
+    fn restore_material(&self) {
+        let first = !std::mem::replace(&mut self.state().material_restored, true);
+        if first && !crate::restore_window_material(&self.window) {
+            crate::write_diagnostic(format_args!(
+                "material: launcher backdrop could not be restored after first reveal"
+            ));
+        }
+    }
+    pub fn search_context(&self, request_id: &str) -> Option<SearchContext> {
+        self.state().model.context(request_id)
+    }
+    /// Whether an action from `context` may change this launcher: the
+    /// context is the current presentation's and no other action holds it.
+    pub fn idle_for(&self, context: &SearchContext) -> bool {
+        self.state().idle_for(context)
+    }
+    pub fn arm_action(&self, id: &str, context: &SearchContext, background: bool) -> bool {
+        if !self.state().arm(id, context, background) {
+            return false;
+        }
+        self.on_main(|this| this.publish());
+        true
+    }
+    pub fn action_rejected(&self, id: &str) {
+        let _ = self.state().settle(id);
+    }
+    pub fn operation(&self, result: OperationDisposition) {
+        self.on_main(move |this| {
+            let old_session = this.state().model.session();
+            let mut state = this.state();
+            let Some(pending) = state.settle(&result.operation_id) else {
+                return;
+            };
+            let accepted = matches!(
+                result.outcome,
+                OperationOutcome::Applied | OperationOutcome::NoOp | OperationOutcome::Deferred
+            );
+            if !accepted {
+                state.model.reject();
+                drop(state);
+                this.publish();
+                return;
+            }
+            // A background open leaves the launcher where it is, so several
+            // results can be sent to the browser in one visit.
+            if pending.background {
+                return;
+            }
+            let editing = state.model.editing_tab();
+            state.model.hide();
+            drop(state);
+            this.cancel_search(old_session);
+            this.present();
+            // The page is in a mini window: that window is what comes
+            // forward, and the main window stays where it is.
+            if result.reason == OperationReason::OpenedInMini {
+                #[cfg(target_os = "macos")]
+                crate::panel::forget_previous();
+                if let Some(tab) = editing {
+                    crate::mini::focus_page(this.window.app_handle(), &tab);
+                }
+            } else {
+                this.raise_browser();
+            }
+        });
+    }
+    pub fn focus_changed(&self) {
+        let mut observed = {
+            let mut state = self.state();
+            let observed = state.model.record_focus_change();
+            if state.focus_timer {
+                return;
+            }
+            state.focus_timer = true;
+            observed
+        };
+        let this = self.clone();
+        tauri::async_runtime::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(35)).await;
+                let settled = {
+                    let mut state = this.state();
+                    if state.closed {
+                        return;
+                    }
+                    if state.model.latest_focus_change() == observed {
+                        state.focus_timer = false;
+                        true
+                    } else {
+                        observed = state.model.latest_focus_change();
+                        false
+                    }
+                };
+                if settled {
+                    break;
+                }
+            }
+            this.on_main(move |this| {
+                if !this.state().model.ready {
+                    return;
+                }
+                let panel_focused = this.window.is_focused().unwrap_or(false);
+                // A mini window is a browser window like the main one:
+                // moving to it puts the launcher away.
+                let main_focused = this
+                    .window
+                    .app_handle()
+                    .get_webview_window(crate::MAIN_LABEL)
+                    .is_some_and(|window| window.is_focused().unwrap_or(false))
+                    || crate::mini::focused(this.window.app_handle()).is_some();
+                let app_active = application_active(panel_focused, main_focused);
+                let old = this.snapshot();
+                let old_session = this.state().model.session();
+                this.state()
+                    .model
+                    .focus(observed, panel_focused, main_focused, app_active);
+                if this.snapshot() != old {
+                    crate::tab_switcher::cancel(this.window_app());
+                    #[cfg(target_os = "macos")]
+                    crate::panel::forget_previous();
+                    this.cancel_search(old_session);
+                    this.present();
+                }
+            });
+        });
+    }
+    pub fn display_changed(&self) {
+        self.on_main(|this| {
+            if this.snapshot().visible {
+                this.place();
+            }
+        });
+    }
+    pub fn destroyed(&self) {
+        self.state().closed = true;
+        idle::destroyed();
+    }
+    /// The window's place on a work area: the launcher's, or the switcher's
+    /// sized to the cards it shows.
+    fn placement(&self, work_width: f64, work_height: f64) -> geometry::Placement {
+        let inset = if animated_shapes() {
+            geometry::SHAPE_INSET
+        } else {
+            0.0
+        };
+        let cards = self
+            .state()
+            .model
+            .switcher
+            .as_ref()
+            .map(|s| s.entries.len());
+        self.state().switcher_columns = geometry::switcher_columns(work_width, inset);
+        match cards {
+            Some(cards) => geometry::Placement::switcher(work_width, work_height, inset, cards),
+            None => geometry::Placement::new(work_width, work_height, inset),
+        }
+    }
+    /// Places the launcher on the display under the pointer, where the user is
+    /// looking, at the same height every time. Everything is in points: the
+    /// pointer, the displays and the frame are AppKit's own, so displays of
+    /// different scale are never converted between.
+    #[cfg(target_os = "macos")]
+    fn place(&self) {
+        let Some(work) = crate::panel::work_area(&self.window) else {
+            return;
+        };
+        let placement = self.placement(work.width, work.height);
+        let height = placement.height(self.state().content_height);
+        crate::panel::place(
+            &self.window,
+            work.left + placement.x,
+            work.top - placement.y,
+            placement.width,
+            height,
+        );
+        self.state().placement = Some(placement);
+    }
+    /// Places the launcher on the display under the pointer, where the user is
+    /// looking, at the same height every time.
+    #[cfg(not(target_os = "macos"))]
+    fn place(&self) {
+        let monitor = self
+            .window
+            .app_handle()
+            .cursor_position()
+            .ok()
+            .and_then(|cursor| {
+                self.window
+                    .available_monitors()
+                    .ok()?
+                    .into_iter()
+                    .find(|monitor| {
+                        let area = monitor.work_area();
+                        cursor.x >= f64::from(area.position.x)
+                            && cursor.y >= f64::from(area.position.y)
+                            && cursor.x < f64::from(area.position.x) + f64::from(area.size.width)
+                            && cursor.y < f64::from(area.position.y) + f64::from(area.size.height)
+                    })
+            })
+            .or_else(|| self.window.current_monitor().ok().flatten())
+            .or_else(|| self.window.primary_monitor().ok().flatten());
+        let Some(monitor) = monitor else {
+            return;
+        };
+        let scale = monitor.scale_factor();
+        if !scale.is_finite() || scale <= 0.0 {
+            return;
+        }
+        let work = monitor.work_area();
+        let placement = self.placement(
+            f64::from(work.size.width) / scale,
+            f64::from(work.size.height) / scale,
+        );
+        let height = placement.height(self.state().content_height);
+        // Windows rescales a window that lands on a display of another scale,
+        // so it moves first and is then sized in that display's own units.
+        // Sized in the previous display's units, its viewport and clip were
+        // wrong after the first crossing.
+        #[cfg(target_os = "windows")]
+        {
+            let _ = self.window.set_position(PhysicalPosition::new(
+                f64::from(work.position.x) + placement.x * scale,
+                f64::from(work.position.y) + placement.y * scale,
+            ));
+            let _ = self.window.as_ref().set_bounds(tauri::Rect {
+                position: PhysicalPosition::new(0.0, 0.0).into(),
+                size: PhysicalSize::new(
+                    placement.width * scale,
+                    placement.height(f64::INFINITY) * scale,
+                )
+                .into(),
+            });
+            let _ = self
+                .window
+                .set_size(PhysicalSize::new(placement.width * scale, height * scale));
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = self
+                .window
+                .set_size(LogicalSize::new(placement.width, height));
+            if position_supported() {
+                let _ = self.window.set_position(PhysicalPosition::new(
+                    f64::from(work.position.x) + placement.x * scale,
+                    f64::from(work.position.y) + placement.y * scale,
+                ));
+            }
+        }
+        self.state().placement = Some(placement);
+    }
+    #[cfg(target_os = "windows")]
+    fn resize_windows(&self) {
+        let (placement, content) = {
+            let state = self.state();
+            (state.placement, state.content_height)
+        };
+        let Some(placement) = placement else {
+            return;
+        };
+        let height = placement.height(content);
+        let scale = self.window.scale_factor().unwrap_or(1.0);
+        if self
+            .window
+            .inner_size()
+            .is_ok_and(|size| (f64::from(size.height) / scale - height).abs() < 1.0)
+        {
+            return;
+        }
+        // Chromium has painted the target content in a stable viewport. Commit
+        // one clip change: independently animating DWM's material here exposes
+        // a trailing band after the DOM has already moved its footer.
+        let _ = self
+            .window
+            .set_size(LogicalSize::new(placement.width, height));
+    }
+    #[cfg(not(target_os = "windows"))]
+    fn resize(&self) {
+        let (placement, content) = {
+            let state = self.state();
+            (state.placement, state.content_height)
+        };
+        let Some(placement) = placement else {
+            return;
+        };
+        let height = placement.height(content);
+        #[cfg(target_os = "macos")]
+        crate::panel::set_height(&self.window, height);
+        #[cfg(not(target_os = "macos"))]
+        let _ = self
+            .window
+            .set_size(LogicalSize::new(placement.width, height));
+    }
+}
+/// Slightly longer than the shapes' own settle, so the window never shrinks
+/// under a shape still moving.
+#[cfg(not(target_os = "windows"))]
+const SHAPES_SETTLE: std::time::Duration = std::time::Duration::from_millis(300);
+
+/// Native draws the launcher's material as separate shapes, which the window
+/// has to leave room around.
+fn animated_shapes() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        crate::panel::shapes_active()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        false
+    }
+}
+
+/// Widens the hidden window around freshly installed shapes. The page first
+/// measures it when it loads, and a width settled later would move the shapes
+/// it had already laid out, gliding the glass in from the corner on the first
+/// arrival.
+#[cfg(target_os = "macos")]
+pub fn fit_to_shapes(window: &WebviewWindow) {
+    if animated_shapes() {
+        let _ = window.set_size(LogicalSize::new(
+            geometry::WIDTH + 2.0 * geometry::SHAPE_INSET,
+            geometry::INITIAL_HEIGHT,
+        ));
+    }
+}
+
+fn destination(tool: ToolKind) -> &'static str {
+    match tool {
+        ToolKind::Notes => "browser.notes",
+        ToolKind::Tasks => "browser.tasks",
+        ToolKind::History => "browser.history",
+        ToolKind::Downloads => "browser.downloads",
+        // Bookmarks have no full page; the browser opens its panel.
+        ToolKind::Bookmarks => "tool.bookmarks",
+        ToolKind::Ai => "tool.ai",
+        ToolKind::Time => "browser.time",
+    }
+}
+pub fn update_context(app: &tauri::AppHandle, context: &PanelOwner) {
+    let owner = Some(Owner {
+        private: context.private,
+        window: context.window_id.clone(),
+        profile: context.profile_id.clone(),
+        name: context.profile_name.clone(),
+        space: context.space_id.clone(),
+    });
+    let changed = app.try_state::<ContextCache>().is_some_and(|cache| {
+        let mut current = cache.0.lock().unwrap_or_else(|e| e.into_inner());
+        if *current == owner {
+            false
+        } else {
+            *current = owner.clone();
+            true
+        }
+    });
+    if !changed {
+        return;
+    }
+    if let Some(overlay) = app.try_state::<Overlay>() {
+        overlay.on_main(move |this| {
+            let old = this.snapshot();
+            let old_session = this.state().model.session();
+            this.state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .model
+                .set_owner(owner);
+            if this.snapshot() != old {
+                this.cancel_search(old_session);
+                this.present();
+            }
+        });
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn position_supported() -> bool {
+    std::env::var_os("WAYLAND_DISPLAY").is_none()
+}
+fn do_hide(window: &WebviewWindow) {
+    #[cfg(target_os = "macos")]
+    crate::panel::hide(window);
+    #[cfg(not(target_os = "macos"))]
+    let _ = window.hide();
+}
+#[cfg(target_os = "linux")]
+fn do_show_with_activation(
+    window: &WebviewWindow,
+    activation_token: Option<&str>,
+    timestamp: Option<u32>,
+) {
+    use gtk::prelude::*;
+    if let Ok(gtk_window) = window.gtk_window() {
+        if let Some(token) = activation_token {
+            gtk_window.set_startup_id(token);
+        }
+        let _ = window.show();
+        if let Some(timestamp) = timestamp {
+            gtk_window.present_with_time(timestamp);
+        } else {
+            gtk_window.present();
+        }
+    }
+}
+
+fn visible(window: &WebviewWindow) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        crate::panel::is_visible(window)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        window.is_visible().unwrap_or(false)
+    }
+}
+
+/// Whether the launcher is up and not on its way out, which on macOS is
+/// shorter than the window being visible.
+fn shown(window: &WebviewWindow) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = window;
+        crate::panel::is_shown()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        visible(window)
+    }
+}
+
+fn application_active(panel_focused: bool, main_focused: bool) -> bool {
+    if panel_focused || main_focused {
+        return true;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        crate::panel::application_active()
+    }
+    #[cfg(target_os = "windows")]
+    {
+        use windows::Win32::UI::WindowsAndMessaging::{
+            GetForegroundWindow, GetWindowThreadProcessId,
+        };
+        let mut process = 0;
+        // SAFETY: queries only an OS-owned foreground window handle; the output
+        // pointer is a live stack u32 and no ownership crosses this call.
+        unsafe {
+            GetWindowThreadProcessId(GetForegroundWindow(), Some(&mut process));
+        }
+        process == std::process::id()
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use gtk::prelude::*;
+        gtk::Window::list_toplevels()
+            .into_iter()
+            .filter_map(|widget| widget.downcast::<gtk::Window>().ok())
+            .any(|window| window.is_active())
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+    {
+        false
+    }
+}
+
+/// First-use construction stays on the UI thread; no unused launcher renderer.
+#[cfg(not(target_os = "linux"))]
+type BuildPanel = Box<dyn FnOnce() -> crate::SetupResult + Send>;
+#[cfg(not(target_os = "linux"))]
+pub struct Factory(Mutex<FactoryState>);
+#[cfg(not(target_os = "linux"))]
+type PanelAction = Box<dyn FnOnce(&Overlay) + Send>;
+#[cfg(not(target_os = "linux"))]
+struct FactoryState {
+    build: Option<BuildPanel>,
+    queued: Vec<PanelAction>,
+}
+#[cfg(not(target_os = "linux"))]
+impl Factory {
+    pub fn new(build: impl FnOnce() -> crate::SetupResult + Send + 'static) -> Self {
+        Self(Mutex::new(FactoryState {
+            build: Some(Box::new(build)),
+            queued: Vec::new(),
+        }))
+    }
+}
+pub fn request(app: &tauri::AppHandle, action: impl FnOnce(&Overlay) + Send + 'static) -> bool {
+    let handle = app.clone();
+    app.run_on_main_thread(move || {
+        if crate::shutdown_started(&handle) {
+            return;
+        }
+        if let Some(panel) = handle.try_state::<Overlay>() {
+            action(&panel);
+            return;
+        }
+        #[cfg(not(target_os = "linux"))]
+        if let Some(factory) = handle.try_state::<Factory>() {
+            let build = {
+                let mut factory = factory.0.lock().unwrap_or_else(|e| e.into_inner());
+                // WebView construction pumps native messages. Retain requests
+                // that reenter here while the first request is still building.
+                if factory.queued.len() >= 32 {
+                    return;
+                }
+                factory.queued.push(Box::new(action));
+                factory.build.take()
+            };
+            let Some(build) = build else {
+                return;
+            };
+            // A request can arrive inside a webview IPC callback, where
+            // run_on_main_thread runs inline and WebView2 cannot finish creating
+            // another webview (#128). Post the build to a later event-loop turn.
+            let deferred = handle.clone();
+            tauri::async_runtime::spawn(async move {
+                let target = deferred.clone();
+                let _ = deferred.run_on_main_thread(move || construct(&target, build));
+            });
+        }
+    })
+    .is_ok()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn construct(handle: &tauri::AppHandle, build: BuildPanel) {
+    let Some(factory) = handle.try_state::<Factory>() else {
+        return;
+    };
+    if crate::shutdown_started(handle) {
+        factory
+            .0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .queued
+            .clear();
+        return;
+    }
+    if let Err(error) = build() {
+        factory
+            .0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .queued
+            .clear();
+        crate::request_startup_failure(
+            handle,
+            format_args!("launcher construction failed: {error}"),
+        );
+        return;
+    }
+    let queued = std::mem::take(&mut factory.0.lock().unwrap_or_else(|e| e.into_inner()).queued);
+    if let Some(panel) = handle.try_state::<Overlay>() {
+        for action in queued {
+            if crate::shutdown_started(handle) {
+                break;
+            }
+            action(&panel);
+        }
+    }
+}
+
+#[cfg(test)]
+mod context_cache_tests {
+    use super::*;
+    #[test]
+    fn newtab_search_does_not_require_a_launcher_window() {
+        let cache = ContextCache::default();
+        assert!(cache.newtab_context("tab", 1).is_none());
+        *cache.0.lock().unwrap() = Some(Owner {
+            private: false,
+            window: "window".into(),
+            profile: "profile".into(),
+            name: "Personal".into(),
+            space: "space".into(),
+        });
+        let context = cache.newtab_context("tab", 7).unwrap();
+        assert_eq!(context.window_id, "window");
+        assert_eq!(context.profile_id, "profile");
+        assert_eq!(context.space_id, "space");
+        assert_eq!(context.session_id, "newtab:tab:7");
+        assert_eq!(cache.search_private(&context), Some(false));
+        cache.0.lock().unwrap().as_mut().unwrap().private = true;
+        assert_eq!(cache.search_private(&context), Some(true));
+        let mut stale = context.clone();
+        stale.profile_id = "another-profile".into();
+        assert_eq!(cache.search_private(&stale), None);
+        stale = context.clone();
+        stale.window_id = "another-window".into();
+        assert_eq!(cache.search_private(&stale), None);
+        stale = context.clone();
+        stale.space_id = "another-space".into();
+        assert_eq!(cache.search_private(&stale), None);
+        cache.0.lock().unwrap().as_mut().unwrap().space = "next".into();
+        assert_eq!(cache.newtab_context("tab", 8).unwrap().space_id, "next");
+    }
+}
+
+#[cfg(test)]
+mod action_barrier_tests {
+    use super::*;
+    fn presented() -> State {
+        let mut model = Model::default();
+        model.set_owner(Some(Owner {
+            private: false,
+            window: "window".into(),
+            profile: "profile".into(),
+            name: "Personal".into(),
+            space: "space".into(),
+        }));
+        model.search();
+        State {
+            model,
+            pending: None,
+            content_height: geometry::INITIAL_HEIGHT,
+            layout_revision: 0,
+            placement: None,
+            placed_for: None,
+            switcher_columns: geometry::SWITCHER_COLUMNS,
+            pending_document: None,
+            focus_timer: false,
+            closed: false,
+            suspending: false,
+            #[cfg(target_os = "windows")]
+            material_restored: false,
+        }
+    }
+
+    #[test]
+    fn one_action_holds_the_launcher_until_it_settles() {
+        let mut state = presented();
+        let context = state.model.context("1").unwrap();
+        assert!(state.arm("app", &context, false));
+        // A shell action sent while an app command is in flight would hide
+        // whichever outcome lands second.
+        assert!(!state.arm("shell", &context, false));
+        assert!(state.settle("shell").is_none());
+        assert!(state.settle("app").is_some());
+        assert!(state.arm("shell", &context, false));
+    }
+
+    #[test]
+    fn a_refused_command_releases_the_launcher() {
+        let mut state = presented();
+        let context = state.model.context("1").unwrap();
+        assert!(state.arm("disabled", &context, false));
+        // What `action_rejected` does when routing refuses the command.
+        let _ = state.settle("disabled");
+        assert!(state.pending.is_none());
+        assert!(state.arm("next", &context, false));
+    }
+
+    #[test]
+    fn only_the_current_idle_presentation_may_change_mode() {
+        let mut state = presented();
+        let context = state.model.context("1").unwrap();
+        assert!(state.idle_for(&context));
+        assert!(state.arm("open", &context, false));
+        assert!(!state.idle_for(&context));
+        let _ = state.settle("open");
+        assert!(state.idle_for(&context));
+        state.model.hide();
+        state.begin();
+        assert!(!state.idle_for(&context));
+    }
+
+    #[test]
+    fn a_stale_presentation_arms_nothing() {
+        let mut state = presented();
+        let stale = state.model.context("1").unwrap();
+        state.model.hide();
+        state.begin();
+        assert!(!state.arm("late", &stale, false));
+        assert!(state.pending.is_none());
+    }
+}

@@ -1,0 +1,427 @@
+/* Aether Signature Visual Polish — isolated in one file for easy tweaking or rollback. */
+
+:root {
+  --radius-row: 10px;
+}
+
+/* Active tab: Aether aurora left indicator + luminous glass rim */
+.browse-tab[data-selected="true"] {
+  position: relative;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.14),
+    0 2px 10px rgba(56, 189, 248, 0.1) !important;
+}
+
+.browse-tab[data-selected="true"]::before {
+  content: "";
+  position: absolute;
+  inset-inline-start: 3px;
+  inset-block: 7px;
+  width: 3px;
+  border-radius: 999px;
+  background: linear-gradient(180deg, #38bdf8 0%, #818cf8 100%);
+  box-shadow: 0 0 8px rgba(56, 189, 248, 0.65);
+  pointer-events: none;
+}
+
+.browse-tab:not([data-selected="true"]) {
+  transition:
+    background-color 140ms ease,
+    color 140ms ease,
+    transform 140ms ease;
+}
+
+.browse-tab:not([data-selected="true"]):hover {
+  transform: translateX(2px);
+}
+
+/* Focused address bar: subtle Aether cyan-indigo focus aura */
+aside :has(> [data-zephium-address]:focus),
+.field:has([data-zephium-address]:focus) {
+  box-shadow:
+    0 0 0 1.5px rgba(56, 189, 248, 0.55),
+    0 6px 24px rgba(14, 165, 233, 0.16) !important;
+  transition: box-shadow 180ms ease;
+}
+
+/* New Tab hero: ethereal prism glow behind AETHER wordmark */
+[data-zephium-new-tab] .mark {
+  filter:
+    drop-shadow(0 0 26px rgba(96, 165, 250, 0.32))
+    drop-shadow(0 4px 14px rgba(8, 15, 36, 0.42));
+}
+
+:root[data-theme="light"] [data-zephium-new-tab] .mark {
+  filter:
+    drop-shadow(0 0 18px rgba(59, 130, 246, 0.16))
+    drop-shadow(0 2px 8px rgba(15, 23, 42, 0.1));
+}
+
+/* New Tab bottom stat pills: subtle glass specular edge + gentle hover lift */
+[data-zephium-new-tab] .figure,
+[data-zephium-new-tab] .stat {
+  backdrop-filter: blur(18px) saturate(140%);
+  -webkit-backdrop-filter: blur(18px) saturate(140%);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.16),
+    0 6px 20px rgba(8, 15, 36, 0.22);
+  transition: transform 180ms ease, box-shadow 180ms ease;
+}
+
+[data-zephium-new-tab] .figure:hover,
+[data-zephium-new-tab] .stat:hover {
+  transform: translateY(-2px);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.26),
+    0 10px 26px rgba(14, 165, 233, 0.18);
+}
+
+/* Uniform, aligned, crisp pinned site tiles in bottom dock:
+   Upper rows: 3 equal columns.
+   Bottom row: Col 1 = Profile + right-aligned divider, Col 2-3 = 2 equal site tiles.
+   Result: exact vertical column alignment across upper and lower rows. */
+.dock[data-compact="false"] .dock-above ul {
+  display: grid !important;
+  grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
+  gap: 6px !important;
+}
+
+.dock[data-compact="false"] .dock-base {
+  display: grid !important;
+  grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
+  gap: 6px !important;
+  align-items: center !important;
+}
+
+.dock[data-compact="false"] .dock-profile-col {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  min-width: 0;
+  padding: 0;
+}
+
+.dock[data-compact="false"] .dock-profile-col .shelf {
+  width: 100%;
+  min-width: 0;
+}
+
+.dock[data-compact="false"] .dock-profile-col .shelf .case {
+  display: grid !important;
+  place-items: center !important;
+  width: 100% !important;
+  height: 40px !important;
+  margin-inline: 0 !important;
+  padding: 0 !important;
+  border-radius: 11px !important;
+  background: color-mix(in srgb, var(--color-tile) 68%, #000000) !important;
+  box-shadow: var(--shine), var(--shadow-tile) !important;
+}
+
+.dock[data-compact="false"] .dock-profile-col .shelf .case:hover {
+  background: color-mix(in srgb, var(--color-tile-hover) 78%, #000000) !important;
+}
+
+.dock[data-compact="false"] .essential {
+  transition:
+    transform 180ms cubic-bezier(0.2, 0.8, 0.2, 1),
+    opacity 140ms ease;
+}
+
+.dock[data-compact="false"] .dock-sites[data-over="true"] {
+  border-radius: 12px;
+  box-shadow: inset 0 0 0 1.5px rgba(56, 189, 248, 0.45);
+  transition: box-shadow 140ms ease;
+}
+
+.dock[data-compact="false"] .dock-sites-slot {
+  grid-column: 2 / 4;
+}
+
+.dock[data-compact="false"] .dock-sites-slot ul {
+  display: grid !important;
+  grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+  gap: 6px !important;
+}
+
+.dock[data-compact="false"] .essential > button[data-plate] {
+  width: 100% !important;
+  height: 40px !important;
+  border-radius: 11px !important;
+  color: var(--color-text);
+}
+
+.essential [data-favicon] canvas {
+  image-rendering: -webkit-optimize-contrast;
+}
+
+/* Classic Top Bar mode: align New Tab / internal pages cleanly under TopBar */
+.shell[data-top-bar] .stage-column > main {
+  padding-inline-start: 0 !important;
+  padding-top: 8px;
+}
+
+/* Ensure collapsed group rows actually hide (overrides .browse-tab display:flex) */
+.browse-tab.hidden,
+.aether-group-child.hidden {
+  display: none !important;
+}
+
+/* Unified rounded card look for auto-grouped site folders (matching Arc/Zen style) */
+.aether-group-header {
+  margin-top: 6px;
+  padding: 2px 2px 0;
+  border-radius: 12px 12px 0 0;
+  background: var(--group-bg, rgba(148, 163, 184, 0.1));
+  transition: background-color 140ms ease, border-radius 140ms ease;
+}
+
+.aether-group-header.aether-subgroup {
+  margin-top: 3px;
+  margin-left: calc(var(--tree-level, 1) * 12px) !important;
+}
+
+.aether-group-header:not([data-group-expanded]) {
+  border-radius: 12px;
+  padding-bottom: 2px;
+  margin-bottom: 4px;
+}
+
+.aether-group-header:hover {
+  background: var(--group-bg-hover, rgba(148, 163, 184, 0.14));
+}
+
+.aether-group-child {
+  margin-left: 0 !important;
+  margin-top: 0 !important;
+  padding-inline: 6px;
+  border-radius: 0 !important;
+  background: var(--group-bg, rgba(148, 163, 184, 0.1)) !important;
+}
+
+.aether-group-child.aether-subgroup.aether-tree-1 {
+  margin-left: 12px !important;
+}
+
+.aether-group-child.aether-subgroup.aether-tree-2 {
+  margin-left: 24px !important;
+}
+
+.aether-group-child.aether-subgroup.aether-tree-3 {
+  margin-left: 36px !important;
+}
+
+.aether-group-child.aether-subgroup.aether-tree-4 {
+  margin-left: 48px !important;
+}
+
+.aether-group-child.aether-group-last {
+  border-radius: 0 0 12px 12px !important;
+  padding-bottom: 6px;
+  margin-bottom: 6px;
+}
+
+.aether-group-child[data-selected="true"] {
+  background: var(--group-bg, rgba(148, 163, 184, 0.1)) !important;
+  box-shadow: none !important;
+}
+
+.aether-group-child[data-selected="true"]::before {
+  display: none !important;
+}
+
+.aether-group-child[data-selected="true"] > .tab-open {
+  background: rgba(12, 15, 22, 0.72);
+  border-radius: 9px;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.12),
+    0 2px 8px rgba(0, 0, 0, 0.25);
+  color: #ffffff;
+}
+
+.aether-group-child:not([data-selected="true"]):hover {
+  transform: none !important;
+  background: var(--group-bg, rgba(148, 163, 184, 0.1)) !important;
+}
+
+.aether-group-child:not([data-selected="true"]):hover > .tab-open {
+  background: rgba(255, 255, 255, 0.06);
+  border-radius: 9px;
+}
+
+/* Direct parent-child tab tree styling */
+.aether-tree-row {
+  background: var(--group-bg, rgba(110, 145, 190, 0.12)) !important;
+  border-radius: 0 !important;
+  padding-inline: 4px;
+}
+
+.aether-tree-row.aether-tree-root {
+  margin-top: 5px;
+  border-radius: 11px 11px 0 0 !important;
+  padding-top: 2px;
+}
+
+.aether-tree-row.aether-tree-last {
+  border-radius: 0 0 11px 11px !important;
+  padding-bottom: 3px;
+  margin-bottom: 5px;
+}
+
+.aether-tree-row.aether-tree-root.aether-tree-last {
+  border-radius: 11px !important;
+}
+
+.aether-tree-row[data-selected="true"] {
+  background: var(--group-bg, rgba(110, 145, 190, 0.12)) !important;
+  box-shadow: none !important;
+}
+
+.aether-tree-row[data-selected="true"]::before {
+  display: none !important;
+}
+
+.aether-tree-row[data-selected="true"] > .tab-open {
+  background: rgba(12, 15, 22, 0.72);
+  border-radius: 8px;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.12);
+  color: #ffffff;
+}
+
+.aether-tree-row:not([data-selected="true"]):hover {
+  transform: none !important;
+  background: var(--group-bg, rgba(110, 145, 190, 0.12)) !important;
+}
+
+.aether-tree-row:not([data-selected="true"]):hover > .tab-open {
+  background: rgba(255, 255, 255, 0.06);
+  border-radius: 8px;
+}
+
+.aether-tree-toggle {
+  position: relative;
+  z-index: 3;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  flex: none;
+  height: 20px;
+  margin-inline-end: 4px;
+  padding: 0 5px;
+  border: 0;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--color-label-secondary);
+  cursor: pointer;
+  transition: background-color 110ms ease, color 110ms ease;
+}
+
+.aether-tree-toggle:hover {
+  background: rgba(255, 255, 255, 0.14);
+  color: var(--color-text);
+}
+
+.aether-tree-toggle svg {
+  transform: rotate(-90deg);
+  transition: transform 150ms ease;
+}
+
+.aether-tree-toggle[data-expanded] svg {
+  transform: rotate(0deg);
+}
+
+.aether-tree-count {
+  font-size: 10px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.browse-tab:hover .aether-tree-toggle {
+  margin-inline-end: 24px;
+}
+
+/* 6 calm, muted, low-saturation group card tints */
+.aether-tint-0 {
+  --group-bg: rgba(110, 145, 190, 0.13);
+  --group-bg-hover: rgba(110, 145, 190, 0.17);
+}
+
+.aether-tint-1 {
+  --group-bg: rgba(130, 134, 195, 0.13);
+  --group-bg-hover: rgba(130, 134, 195, 0.17);
+}
+
+.aether-tint-2 {
+  --group-bg: rgba(88, 168, 162, 0.12);
+  --group-bg-hover: rgba(88, 168, 162, 0.16);
+}
+
+.aether-tint-3 {
+  --group-bg: rgba(185, 158, 108, 0.12);
+  --group-bg-hover: rgba(185, 158, 108, 0.16);
+}
+
+.aether-tint-4 {
+  --group-bg: rgba(182, 120, 148, 0.12);
+  --group-bg-hover: rgba(182, 120, 148, 0.16);
+}
+
+.aether-tint-5 {
+  --group-bg: rgba(96, 166, 132, 0.12);
+  --group-bg-hover: rgba(96, 166, 132, 0.16);
+}
+
+/* Background tab opened tooltip & subtle pulse */
+.aether-bg-new {
+  animation: aether-bg-pulse 1.2s ease-out;
+}
+
+@keyframes aether-bg-pulse {
+  0% {
+    box-shadow: inset 0 0 0 1.5px rgba(56, 189, 248, 0.75);
+  }
+  100% {
+    box-shadow: inset 0 0 0 0 rgba(56, 189, 248, 0);
+  }
+}
+
+.aether-bg-toast {
+  position: sticky;
+  bottom: 8px;
+  z-index: 30;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  margin: 6px auto 2px;
+  padding: 6px 11px;
+  border-radius: 999px;
+  background: rgba(18, 22, 30, 0.92);
+  backdrop-filter: blur(14px);
+  border: 1px solid rgba(56, 189, 248, 0.32);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.38);
+  color: #e2e8f0;
+  font-size: 11.5px;
+  font-weight: 550;
+  pointer-events: none;
+  animation: aether-toast-in 180ms ease-out;
+}
+
+.aether-bg-toast-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #38bdf8;
+  box-shadow: 0 0 8px rgba(56, 189, 248, 0.85);
+}
+
+@keyframes aether-toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}

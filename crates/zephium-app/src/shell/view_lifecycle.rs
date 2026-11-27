@@ -1,0 +1,1687 @@
+//! Bounded native-view residency, discard, crash, and process recovery.
+
+use super::*;
+use zephium_core::ports::engine::MemoryPressure;
+
+// The few most recently used hidden pages stay warm for instant switching;
+// older hidden pages sleep after the chosen idle grace, whatever the tab
+// count. Above the pressure watermark, under critical OS pressure, or while a
+// foreground page waits for a slot, the least recently used page goes first
+// without waiting. The absolute ceiling mirrors the engine's native tab
+// budget; it is a backstop for kept-awake and protected pages, while OS
+// memory pressure is the real budget. Pages are never force-discarded: the
+// engine probe still vetoes anything a reload would lose.
+pub(super) const WARM_VIEW_LIMIT: usize = 2;
+pub(super) const LIVE_VIEW_PRESSURE_LIMIT: usize = 10;
+pub(super) const LIVE_VIEW_ABSOLUTE_LIMIT: usize = 48;
+const _: () = assert!(LIVE_VIEW_ABSOLUTE_LIMIT >= LIVE_VIEW_PRESSURE_LIMIT + MAX_VISIBLE_PANES);
+pub(super) const MAX_CONCURRENT_DISCARD_PROBES: usize = 4;
+pub(super) const DISCARD_IDLE_GRACE: std::time::Duration = std::time::Duration::from_secs(8 * 60);
+// Throttle hidden pages briefly before requesting WebView2 TrySuspend.
+const DORMANT_GRACE: std::time::Duration = std::time::Duration::from_secs(90);
+// A system memory warning can last for hours on small machines; a short
+// grace keeps tabs the user is actively switching between from reloading.
+const WARNING_IDLE_GRACE: std::time::Duration = std::time::Duration::from_secs(60);
+// A few pages hold most of a session's memory. One whose renderer exceeds the
+// heavy threshold sleeps after a short grace, even inside the warm set; only
+// the most recent hidden page stays for instant back-and-forth.
+const HEAVY_PAGE: (u64, std::time::Duration) = (160 << 20, std::time::Duration::from_secs(75));
+const MEMORY_SAMPLE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(20);
+// The warm spare saves about 150 ms on the next page a person opens, at the
+// cost of a renderer process. Once browsing has been quiet this long it is let
+// go; the next completed load warms another.
+pub(super) const SPARE_IDLE: std::time::Duration = std::time::Duration::from_secs(45);
+pub(super) const DISCARD_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+pub(super) const DISCARD_PROTECTED_RETRY: std::time::Duration =
+    std::time::Duration::from_secs(5 * 60);
+const CAPACITY_WAIT: std::time::Duration = std::time::Duration::from_secs(4);
+
+pub(super) struct CapacityRequest {
+    id: ItemId,
+    profile: ProfileId,
+    window: WindowId,
+    space: SpaceId,
+    url: String,
+    pub(super) deadline: std::time::Instant,
+}
+
+#[derive(Clone)]
+pub(super) enum PendingDiscardProbe {
+    Probing {
+        probe: DiscardProbeId,
+        committed_url: String,
+        deadline: std::time::Instant,
+    },
+    Closing {
+        probe: DiscardProbeId,
+        recreate: bool,
+        deferred_navigation: Option<String>,
+        reload_on_refusal: bool,
+    },
+}
+
+const NOTIFICATION_REFRESH: std::time::Duration = std::time::Duration::from_secs(60);
+type NotificationOrigins = std::collections::HashSet<zephium_core::permissions::PageOrigin>;
+type NotificationReplies = std::sync::Arc<
+    std::sync::Mutex<std::collections::HashMap<ProfileId, (u64, Option<NotificationOrigins>)>>,
+>;
+
+struct NotificationObservation {
+    request: u64,
+    private: bool,
+    pending: bool,
+    valid: bool,
+    checked: Option<std::time::Instant>,
+    allowed: Option<NotificationOrigins>,
+}
+
+#[derive(Default)]
+struct NotificationSleepState {
+    native: bool,
+    next: u64,
+    profiles: std::collections::HashMap<ProfileId, NotificationObservation>,
+    replies: NotificationReplies,
+}
+impl NotificationSleepState {
+    fn invalidate(&mut self, profile: ProfileId) {
+        if let Some(observation) = self.profiles.get_mut(&profile) {
+            observation.valid = false;
+            if !observation.private {
+                observation.allowed = None;
+            }
+            observation.checked = None;
+        }
+    }
+    fn invalidate_all(&mut self) {
+        for observation in self.profiles.values_mut() {
+            observation.valid = false;
+            if !observation.private {
+                observation.allowed = None;
+            }
+            observation.checked = None;
+        }
+    }
+    fn reconcile(&mut self, live: &std::collections::HashSet<ProfileId>, now: std::time::Instant) {
+        let replies = std::mem::take(
+            &mut *self
+                .replies
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        );
+        for (profile, (request, allowed)) in replies {
+            if let Some(observation) = self
+                .profiles
+                .get_mut(&profile)
+                .filter(|observation| observation.request == request && observation.pending)
+            {
+                observation.pending = false;
+                if observation.valid && live.contains(&profile) {
+                    observation.allowed = allowed.or_else(|| {
+                        observation
+                            .private
+                            .then(|| observation.allowed.take().unwrap_or_default())
+                    });
+                    observation.checked = Some(now);
+                }
+            }
+        }
+        // Unresolved native reads still own reservations, even after profile
+        // retirement. They cannot be replaced around an unknown callback.
+        self.profiles
+            .retain(|profile, observation| live.contains(profile) || observation.pending);
+    }
+    fn begin(&mut self, profile: ProfileId, private: bool, now: std::time::Instant) -> Option<u64> {
+        if !self.native {
+            return None;
+        }
+        if let Some(observation) = self.profiles.get(&profile) {
+            if observation.pending
+                || observation.checked.is_some_and(|checked| {
+                    now.saturating_duration_since(checked) < NOTIFICATION_REFRESH
+                })
+            {
+                return None;
+            }
+        } else if self.profiles.len() >= zephium_core::session::MAX_SESSION_PROFILES {
+            return None;
+        }
+        let Some(request) = self.next.checked_add(1) else {
+            self.invalidate(profile);
+            return None;
+        };
+        self.next = request;
+        let (checked, allowed) = self
+            .profiles
+            .remove(&profile)
+            .filter(|observation| observation.valid || observation.private)
+            .map_or((None, None), |observation| {
+                (observation.checked, observation.allowed)
+            });
+        self.profiles.insert(
+            profile,
+            NotificationObservation {
+                request,
+                private,
+                pending: true,
+                valid: true,
+                checked,
+                allowed,
+            },
+        );
+        Some(request)
+    }
+    fn keeps_awake(
+        &self,
+        profile: ProfileId,
+        origin: Option<&zephium_core::permissions::PageOrigin>,
+        established: bool,
+    ) -> bool {
+        self.native
+            && self.profiles.get(&profile).is_none_or(|observation| {
+                (observation.pending && !established)
+                    || !observation.valid
+                    || observation
+                        .allowed
+                        .as_ref()
+                        .is_none_or(|allowed| origin.is_none_or(|origin| allowed.contains(origin)))
+            })
+    }
+}
+
+pub(super) struct ResidencyState {
+    sleeping: bool,
+    notifications: NotificationSleepState,
+    exceptions: Vec<String>,
+    memory_pressure: MemoryPressure,
+    preferred_limits: (usize, usize),
+    pub(super) heavy_page: (u64, std::time::Duration),
+    pub(super) page_bytes: std::collections::HashMap<ItemId, u64>,
+    memory_sampled: Option<std::time::Instant>,
+    pub(super) capacity_requests: std::collections::VecDeque<CapacityRequest>,
+    capacity_blocked: std::collections::HashMap<ItemId, String>,
+    pub(super) recent: Vec<ItemId>,
+    pub(super) last_focus: std::collections::HashMap<ItemId, std::time::Instant>,
+    pub(super) resident_since: std::collections::HashMap<ItemId, std::time::Instant>,
+    pub(super) inactive_since: std::collections::HashMap<ItemId, std::time::Instant>,
+    last_protected: std::collections::HashSet<ItemId>,
+    last_shown: std::collections::HashSet<ItemId>,
+    pub(super) dormant_min: std::time::Duration,
+    pub(super) dormant_sent: Vec<ItemId>,
+    /// The number of the last desired set sent, and the one each page in it
+    /// was first asked under: a refusal answering an older ask is stale.
+    pub(super) dormant_request: u64,
+    pub(super) dormant_asked: std::collections::HashMap<ItemId, u64>,
+    /// Hidden pages the engine could not suspend; they run until shown again
+    /// and stay out of the desired dormant set, so it matches the engine.
+    pub(super) suspend_refused: std::collections::HashSet<ItemId>,
+    pub(super) discard_idle_min: std::time::Duration,
+    pub(super) discard_probe_timeout: std::time::Duration,
+    pub(super) discard_protected_retry: std::time::Duration,
+    pub(super) warm_view_limit: usize,
+    pub(super) live_view_pressure_limit: usize,
+    pub(super) next_discard_probe: u64,
+    pub(super) discard_probes: std::collections::HashMap<ItemId, PendingDiscardProbe>,
+    pub(super) discard_protected_until: std::collections::HashMap<ItemId, std::time::Instant>,
+    /// While a warm spare may be waiting, the last browsing activity.
+    pub(super) spare_activity: Option<std::time::Instant>,
+}
+
+impl Default for ResidencyState {
+    fn default() -> Self {
+        Self {
+            sleeping: true,
+            // macOS never admits Notifications and has no native grant catalog.
+            // Windows must observe WebView2's durable native decisions.
+            notifications: NotificationSleepState {
+                native: cfg!(target_os = "windows"),
+                ..Default::default()
+            },
+            exceptions: Vec::new(),
+            memory_pressure: MemoryPressure::Normal,
+            preferred_limits: (WARM_VIEW_LIMIT, LIVE_VIEW_PRESSURE_LIMIT),
+            heavy_page: HEAVY_PAGE,
+            page_bytes: std::collections::HashMap::new(),
+            memory_sampled: None,
+            capacity_requests: std::collections::VecDeque::new(),
+            capacity_blocked: std::collections::HashMap::new(),
+            recent: Vec::new(),
+            last_focus: std::collections::HashMap::new(),
+            resident_since: std::collections::HashMap::new(),
+            inactive_since: std::collections::HashMap::new(),
+            last_protected: std::collections::HashSet::new(),
+            last_shown: std::collections::HashSet::new(),
+            dormant_min: DORMANT_GRACE,
+            dormant_sent: Vec::new(),
+            dormant_request: 0,
+            dormant_asked: std::collections::HashMap::new(),
+            suspend_refused: std::collections::HashSet::new(),
+            discard_idle_min: DISCARD_IDLE_GRACE,
+            discard_probe_timeout: DISCARD_PROBE_TIMEOUT,
+            discard_protected_retry: DISCARD_PROTECTED_RETRY,
+            warm_view_limit: WARM_VIEW_LIMIT,
+            live_view_pressure_limit: LIVE_VIEW_PRESSURE_LIMIT,
+            next_discard_probe: 0,
+            discard_probes: std::collections::HashMap::new(),
+            discard_protected_until: std::collections::HashMap::new(),
+            spare_activity: None,
+        }
+    }
+}
+
+impl ResidencyState {
+    pub(super) fn load(store: &dyn zephium_core::ports::store::Store) -> Self {
+        let mut state = Self::default();
+        for key in [
+            "performance.sleep",
+            "performance.after",
+            "performance.memory",
+            "performance.exceptions",
+        ] {
+            if let Some(value) = store.app_setting(key) {
+                state.apply_setting(key, &value);
+            }
+        }
+        state
+    }
+
+    fn apply_setting(&mut self, key: &str, value: &str) {
+        if !zephium_core::preferences::value_allowed(key, value) {
+            return;
+        }
+        match key {
+            "performance.sleep" => self.sleeping = value == "true",
+            "performance.after" => {
+                let minutes = value.parse::<u64>().unwrap_or(30);
+                self.discard_idle_min = std::time::Duration::from_secs(minutes * 60);
+                self.dormant_min = DORMANT_GRACE;
+            }
+            "performance.memory" => {
+                self.preferred_limits = match value {
+                    "save-memory" => (1, 6),
+                    "keep-ready" => (6, 18),
+                    _ => (WARM_VIEW_LIMIT, LIVE_VIEW_PRESSURE_LIMIT),
+                };
+                self.heavy_page = match value {
+                    "save-memory" => (128 << 20, std::time::Duration::from_secs(45)),
+                    "keep-ready" => (384 << 20, std::time::Duration::from_secs(6 * 60)),
+                    _ => HEAVY_PAGE,
+                };
+                self.update_limits();
+            }
+            "performance.exceptions" => {
+                self.exceptions = value.lines().map(str::to_owned).collect()
+            }
+            _ => {}
+        }
+    }
+
+    fn update_limits(&mut self) {
+        let (warm, pressure) = self.preferred_limits;
+        (self.warm_view_limit, self.live_view_pressure_limit) = match self.memory_pressure {
+            MemoryPressure::Normal => (warm, pressure),
+            MemoryPressure::Warning => (warm.min(2), pressure.min(12)),
+            MemoryPressure::Critical => (0, pressure.min(4)),
+        };
+    }
+
+    fn heavy_grace(&self) -> std::time::Duration {
+        match self.memory_pressure {
+            MemoryPressure::Normal => self.heavy_page.1,
+            MemoryPressure::Warning | MemoryPressure::Critical => {
+                self.heavy_page.1.min(WARNING_IDLE_GRACE)
+            }
+        }
+    }
+
+    fn idle_grace(&self) -> std::time::Duration {
+        match self.memory_pressure {
+            MemoryPressure::Normal => self.discard_idle_min,
+            MemoryPressure::Warning | MemoryPressure::Critical => {
+                self.discard_idle_min.min(WARNING_IDLE_GRACE)
+            }
+        }
+    }
+}
+
+pub(super) struct Warmth {
+    warm: std::collections::HashSet<ItemId>,
+    // The most recent hidden page, kept even when heavy.
+    instant: Option<ItemId>,
+}
+
+#[derive(Default)]
+pub(super) struct CrashState {
+    pub(super) crashes: std::collections::HashMap<ItemId, std::time::Instant>,
+    pub(super) presentations: std::collections::HashSet<ItemId>,
+    /// When the person chose to wait for a page that stopped responding.
+    pub(super) unresponsive_waits: std::collections::HashMap<ItemId, std::time::Instant>,
+}
+
+impl Shell {
+    pub(super) fn apply_performance_setting(&mut self, key: &str, value: &str) {
+        if key.starts_with("performance.") {
+            self.residency.apply_setting(key, value);
+            self.maintain_views();
+        }
+    }
+
+    /// The engine gave up suspending a hidden page: it stays awake until it
+    /// is shown again, and its discard grace still applies.
+    pub(super) fn on_dormancy_refused(&mut self, id: ItemId, profile: ProfileId, request: u64) {
+        if self.profile_of_item(id) != Some(profile)
+            || !self.items.tab(id).is_some_and(TabState::has_view)
+            || self
+                .residency
+                .dormant_asked
+                .get(&id)
+                .is_none_or(|asked| request < *asked)
+        {
+            return;
+        }
+        self.residency.suspend_refused.insert(id);
+        self.maintain_views();
+    }
+
+    pub(super) fn on_page_memory(&mut self, id: ItemId, profile: ProfileId, bytes: u64) {
+        if self.profile_of_item(id) == Some(profile)
+            && self.items.tab(id).is_some_and(TabState::has_view)
+        {
+            self.residency.page_bytes.insert(id, bytes);
+        }
+    }
+
+    /// A completed load in `id`'s partition: warm a spare for the next page.
+    pub(super) fn warm_spare_after_load(&mut self, id: ItemId) {
+        self.engine.warm_spare(self.partition_of(id));
+        self.residency.spare_activity = Some(std::time::Instant::now());
+    }
+
+    pub(super) fn note_browsing_activity(&mut self) {
+        if let Some(at) = self.residency.spare_activity.as_mut() {
+            *at = std::time::Instant::now();
+        }
+    }
+
+    /// Lets a waiting spare go once browsing has been quiet for SPARE_IDLE.
+    pub(super) fn release_idle_spare(&mut self) {
+        if self
+            .residency
+            .spare_activity
+            .is_some_and(|at| at.elapsed() >= SPARE_IDLE)
+        {
+            self.residency.spare_activity = None;
+            self.engine.release_spare();
+        }
+    }
+
+    pub(super) fn on_memory_pressure(&mut self, pressure: MemoryPressure) {
+        if self.residency.memory_pressure != pressure {
+            self.residency.memory_pressure = pressure;
+            // The engine closes its spare itself under pressure.
+            if pressure != MemoryPressure::Normal {
+                self.residency.spare_activity = None;
+            }
+            self.engine.set_memory_pressure(pressure);
+            self.residency.update_limits();
+            self.maintain_views();
+        }
+    }
+
+    pub(super) fn invalidate_notification_sleep(&mut self, profile: Option<ProfileId>) {
+        if let Some(profile) = profile {
+            self.residency.notifications.invalidate(profile);
+        } else {
+            self.residency.notifications.invalidate_all();
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn enable_native_notification_source_for_test(&mut self) {
+        self.residency.notifications.native = true;
+    }
+    #[cfg(test)]
+    pub(super) fn disable_native_notification_source_for_test(&mut self) {
+        self.residency.notifications.native = false;
+    }
+
+    fn refresh_notification_sleep(&mut self) {
+        if !self.residency.notifications.native {
+            return;
+        }
+        let live: std::collections::HashSet<ProfileId> = self
+            .items
+            .view_ids()
+            .into_iter()
+            .filter_map(|id| self.profile_of_item(id))
+            .filter(|profile| {
+                self.profiles.get(*profile).is_some()
+                    && !self.profile_deletion_quarantines(*profile)
+            })
+            .collect();
+        let now = std::time::Instant::now();
+        self.residency.notifications.reconcile(&live, now);
+        for profile in &live {
+            let private = self.incognito_profile(*profile);
+            let Some(request) = self.residency.notifications.begin(*profile, private, now) else {
+                continue;
+            };
+            let profile = *profile;
+            let replies = self.residency.notifications.replies.clone();
+            let wake = self.self_queue.as_ref().map(|queue| CallbackHandle {
+                queue: Arc::downgrade(&queue.inner),
+            });
+            self.engine.site_permission_snapshot(
+                profile,
+                Box::new(move |permissions| {
+                    use zephium_core::permissions::{RememberedPagePermission, SitePermissionKind};
+                    let allowed = permissions
+                        .filter(|permissions| {
+                            permissions.len() <= zephium_core::permissions::MAX_SITE_PERMISSIONS
+                        })
+                        .map(|permissions| {
+                            permissions
+                                .into_iter()
+                                .filter(|permission| {
+                                    permission.kind == SitePermissionKind::Notifications
+                                        && permission.decision == RememberedPagePermission::Allow
+                                })
+                                .map(|permission| permission.origin)
+                                .collect()
+                        });
+                    let mut held = replies
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    if held
+                        .get(&profile)
+                        .is_none_or(|(prior, _)| request >= *prior)
+                        && (held.contains_key(&profile)
+                            || held.len() < zephium_core::session::MAX_SESSION_PROFILES)
+                    {
+                        held.insert(profile, (request, allowed));
+                    }
+                    drop(held);
+                    if let Some(wake) = wake {
+                        let _ = wake.dispatch(Command::Tick);
+                    }
+                }),
+            );
+        }
+        // A synchronous native/fake answer can be used in this same pass.
+        self.residency.notifications.reconcile(&live, now);
+    }
+
+    fn notification_kept_awake(&self, id: ItemId, established: bool) -> bool {
+        let Some(profile) = self.profile_of_item(id) else {
+            return self.residency.notifications.native;
+        };
+        let origin = self
+            .items
+            .tab(id)
+            .and_then(|tab| tab.url.as_ref())
+            .and_then(|url| zephium_core::permissions::PageOrigin::from_url(url).ok());
+        self.residency
+            .notifications
+            .keeps_awake(profile, origin.as_ref(), established)
+    }
+
+    fn site_kept_awake(&self, id: ItemId, established: bool) -> bool {
+        self.notification_kept_awake(id, established)
+            || self
+                .items
+                .tab(id)
+                .and_then(|tab| tab.url.as_ref())
+                .and_then(|url| url.host_str())
+                .is_some_and(|host| {
+                    self.residency.exceptions.iter().any(|site| {
+                        zephium_core::time::site_covers(site, host.trim_end_matches('.'))
+                    })
+                })
+    }
+
+    /// Suspending or discarding would cut off what the person hears, watches
+    /// in picture in picture, or sends from a camera or microphone.
+    pub(super) fn keeps_running(&self, id: ItemId) -> bool {
+        self.items.tab(id).is_some_and(|tab| {
+            tab.audio.shown()
+                || tab
+                    .capture
+                    .as_ref()
+                    .is_some_and(|(_, state)| state.is_capturing())
+        }) || self.media.get(id).is_some_and(|media| media.in_pip)
+    }
+
+    /// A page that starts sound, capture or picture in picture wakes now, and
+    /// one that stops sleeps on this pass instead of the next.
+    pub(super) fn follow_running(&mut self, id: ItemId, was_running: bool) {
+        if self.keeps_running(id) != was_running {
+            self.maintain_views();
+        }
+    }
+
+    /// Only a foreground intent may wait for an acknowledged safe close. The
+    /// queue is bounded by visible panes and never makes an unsafe page eligible.
+    pub(super) fn wait_for_view_capacity(&mut self, id: ItemId, url: String) -> bool {
+        if !self.discard_protected_leaves().contains(&id) {
+            return false;
+        }
+        let Some(window) = self.windows.focused() else {
+            return false;
+        };
+        let Some(profile) = self.profile_of_item(id) else {
+            return false;
+        };
+        let (window, space) = (window.id, window.space);
+        if let Some(request) = self
+            .residency
+            .capacity_requests
+            .iter_mut()
+            .find(|request| request.id == id)
+        {
+            request.url = url;
+            request.profile = profile;
+            request.window = window;
+            request.space = space;
+            request.deadline = std::time::Instant::now() + CAPACITY_WAIT;
+        } else {
+            if self.residency.capacity_requests.len() >= MAX_VISIBLE_PANES {
+                return false;
+            }
+            self.residency.capacity_requests.push_back(CapacityRequest {
+                id,
+                profile,
+                window,
+                space,
+                url,
+                deadline: std::time::Instant::now() + CAPACITY_WAIT,
+            });
+        }
+        self.rollback_capacity_create(id);
+        self.residency.capacity_blocked.remove(&id);
+        if let Some(queue) = &self.self_queue {
+            queue.schedule_view_capacity(id, std::time::Instant::now() + CAPACITY_WAIT);
+        }
+        true
+    }
+
+    pub(super) fn rollback_capacity_create(&mut self, id: ItemId) {
+        self.record_view_retirement(id);
+        let title = self.items.tab(id).map(|tab| tab.title.clone());
+        self.items.view_creation_failed(id);
+        if let Some(title) = title {
+            self.items.set_title(id, title);
+        }
+    }
+
+    pub(super) fn mark_capacity_blocked(&mut self, id: ItemId, url: String) {
+        self.rollback_capacity_create(id);
+        self.residency.capacity_blocked.insert(id, url);
+    }
+
+    pub(super) fn capacity_presentation(&self, id: ItemId) -> Option<zephium_ipc::TabAvailability> {
+        if let Some(request) = self
+            .residency
+            .capacity_requests
+            .iter()
+            .find(|request| request.id == id)
+        {
+            Some(zephium_ipc::TabAvailability::WaitingForCapacity {
+                url: request.url.clone(),
+            })
+        } else {
+            self.residency
+                .capacity_blocked
+                .get(&id)
+                .map(|url| zephium_ipc::TabAvailability::BlockedByCapacity { url: url.clone() })
+        }
+    }
+
+    pub(super) fn clear_capacity_status(&mut self, id: ItemId) {
+        self.residency.capacity_blocked.remove(&id);
+        self.residency
+            .capacity_requests
+            .retain(|request| request.id != id);
+        if let Some(queue) = &self.self_queue {
+            queue.cancel_view_capacity(id);
+        }
+    }
+
+    pub(super) fn on_view_capacity_retry(&mut self, _id: ItemId) {
+        self.maintain_views();
+    }
+
+    fn retry_capacity_requests(&mut self) {
+        let protected = self.discard_protected_leaves();
+        let now = std::time::Instant::now();
+        let mut pending = std::mem::take(&mut self.residency.capacity_requests);
+        while let Some(request) = pending.pop_front() {
+            if let Some(queue) = &self.self_queue {
+                queue.cancel_view_capacity(request.id);
+            }
+            if self.profile_of_item(request.id) != Some(request.profile)
+                || self.items.tab(request.id).is_none_or(TabState::has_view)
+            {
+                continue;
+            }
+            let same_scope = self.windows.focused().is_some_and(|window| {
+                window.id == request.window
+                    && window.space == request.space
+                    && window.profile == request.profile
+            });
+            if !same_scope || !protected.contains(&request.id) || now >= request.deadline {
+                self.residency
+                    .capacity_blocked
+                    .insert(request.id, request.url);
+                self.project_tab(request.id);
+            } else if self.items.view_ids().len() < LIVE_VIEW_ABSOLUTE_LIMIT {
+                let effects = self.items.navigate(request.id, &request.url);
+                self.apply(effects);
+                let _ = self.relayout();
+                self.project_tab(request.id);
+            } else {
+                if let Some(queue) = &self.self_queue {
+                    queue.schedule_view_capacity(request.id, request.deadline);
+                }
+                self.residency.capacity_requests.push_back(request);
+            }
+        }
+    }
+    pub(super) fn on_view_creation_failed(&mut self, id: ItemId) {
+        self.record_view_retirement(id);
+        crate::diagnostic!("view-create: native failure or presentation retirement");
+        self.zoom.pending.remove(&id);
+        self.cancel_pending_presentation(id);
+        self.clear_discard_after_retirement(id);
+        self.items.view_creation_failed(id);
+        if self.https_first_reopen(id) {
+            let _ = self.relayout();
+            self.project_tab(id);
+            return;
+        }
+        let split_collapsed = self.collapse_failed_split_leaf(id);
+        if split_collapsed {
+            self.schedule_persist();
+        }
+        let _ = self.relayout();
+        if split_collapsed {
+            self.project_items();
+        } else {
+            self.project_tab(id);
+        }
+    }
+
+    // Sleeping-tabs model: hidden idle views are suspended, then a
+    // bounded set of exact-generation/epoch probes may authorize full native
+    // discard. Positive renderer results are only advisory until this actor
+    // rechecks URL, loading, visibility, idle age, and the current budget.
+    pub(super) fn maintain_views(&mut self) -> bool {
+        self.expire_tab_preview(std::time::Instant::now());
+        self.prune_mini_windows();
+        self.crash
+            .crashes
+            .retain(|id, _| self.items.tab(*id).is_some());
+        self.crash
+            .presentations
+            .retain(|id| self.items.tab(*id).is_some());
+        self.crash
+            .unresponsive_waits
+            .retain(|id, _| self.items.tab(*id).is_some_and(TabState::has_view));
+        self.zoom
+            .pending
+            .retain(|id, _| self.items.tab(*id).is_some_and(TabState::has_view));
+        if self.windows.focused().is_none() {
+            return false;
+        }
+        self.prune_work_pane();
+        self.residency
+            .capacity_blocked
+            .retain(|id, _| self.items.tab(*id).is_some_and(|tab| !tab.has_view()));
+        self.retry_capacity_requests();
+        let mut shown: std::collections::HashSet<ItemId> = if self.window_visible {
+            let mut shown: std::collections::HashSet<ItemId> = self
+                .visible_tree()
+                .map(|t| t.tabs().into_iter().collect())
+                .unwrap_or_default();
+            // A failure in front of the page is what the person is looking
+            // at; its view must not go to sleep under it.
+            shown.extend(
+                self.windows
+                    .focused()
+                    .and_then(|window| window.active)
+                    .filter(|id| {
+                        self.items
+                            .tab(*id)
+                            .is_some_and(|tab| tab.has_view() && tab.failure_covers_page())
+                    }),
+            );
+            shown
+        } else {
+            std::collections::HashSet::new()
+        };
+        // A mini window is its own window: the main one being minimized
+        // does not hide its page.
+        shown.extend(self.mini_pages());
+        self.residency
+            .recent
+            .retain(|id| self.items.tab(*id).is_some());
+        self.residency
+            .last_focus
+            .retain(|id, _| self.items.tab(*id).is_some());
+        self.residency
+            .resident_since
+            .retain(|id, _| self.items.tab(*id).is_some_and(TabState::has_view));
+        self.residency
+            .inactive_since
+            .retain(|id, _| self.items.tab(*id).is_some_and(TabState::has_view));
+        self.residency
+            .page_bytes
+            .retain(|id, _| self.items.tab(*id).is_some_and(TabState::has_view));
+        self.last_visits
+            .retain(|id, _| self.items.tab(*id).is_some());
+        self.residency.discard_protected_until.retain(|id, until| {
+            self.items.tab(*id).is_some() && *until > std::time::Instant::now()
+        });
+
+        // A timeout command is ordinary coalescible work and may be displaced
+        // during a full lifecycle burst. The maintenance pass independently
+        // expires the same fixed set so overload cannot strand all probe slots.
+        let expired: Vec<ItemId> = self
+            .residency
+            .discard_probes
+            .iter()
+            .filter_map(|(id, state)| match state {
+                PendingDiscardProbe::Probing { deadline, .. }
+                    if *deadline <= std::time::Instant::now() =>
+                {
+                    Some(*id)
+                }
+                _ => None,
+            })
+            .collect();
+        for id in expired {
+            self.residency.discard_probes.remove(&id);
+            if let Some(queue) = &self.self_queue {
+                queue.cancel_discard_probe(id);
+            }
+            self.protect_discard_candidate(id);
+        }
+
+        // Conceptual visible leaves remain protected even while the OS window
+        // is minimized. Dormancy may hide them, but discard must not destroy a
+        // split the user expects to reappear atomically.
+        let protected = self.discard_protected_leaves();
+        self.record_inactive_leaves(&protected, &shown);
+        self.refresh_notification_sleep();
+        let live_count = self.items.view_ids().len();
+        let warm = self.warm_views(&protected);
+        self.sample_hidden_page_memory(&shown);
+        let invalid_probes: Vec<ItemId> = self
+            .residency
+            .discard_probes
+            .iter()
+            .filter_map(|(id, state)| match state {
+                PendingDiscardProbe::Probing { committed_url, .. } => {
+                    let valid = self.wants_discard(*id, live_count, &warm)
+                        && !protected.contains(id)
+                        && self.items.tab(*id).is_some_and(|tab| {
+                            tab.has_view()
+                                && !tab.loading
+                                && tab
+                                    .url
+                                    .as_ref()
+                                    .is_some_and(|url| url.as_str() == committed_url)
+                        });
+                    (!valid).then_some(*id)
+                }
+                PendingDiscardProbe::Closing { .. } => self.items.tab(*id).is_none().then_some(*id),
+            })
+            .collect();
+        for id in invalid_probes {
+            if self.items.tab(id).is_none() {
+                self.residency.discard_probes.remove(&id);
+                if let Some(queue) = &self.self_queue {
+                    queue.cancel_discard_probe(id);
+                }
+            } else {
+                self.cancel_discard_probe(id);
+            }
+        }
+        // Preference/visibility changes can still veto a native close before
+        // its final retirement point. Preserve the exact terminal obligation;
+        // a cancellation is not a physical-close acknowledgment.
+        let cancelled_closes: Vec<(ItemId, DiscardProbeId)> = self
+            .residency
+            .discard_probes
+            .iter()
+            .filter_map(|(id, state)| match state {
+                PendingDiscardProbe::Closing { probe, .. }
+                    if !self.wants_discard(*id, live_count, &warm)
+                        || protected.contains(id)
+                        || self.items.tab(*id).is_some_and(|tab| tab.loading) =>
+                {
+                    Some((*id, *probe))
+                }
+                _ => None,
+            })
+            .collect();
+        for (id, probe) in cancelled_closes {
+            self.engine.cancel_discard(id, probe);
+        }
+
+        // A refusal lasts while the page could sleep; once it no longer may,
+        // the next time it can is asked afresh.
+        let refused = std::mem::take(&mut self.residency.suspend_refused);
+        self.residency.suspend_refused = refused
+            .into_iter()
+            .filter(|id| self.may_sleep(*id, &shown))
+            .collect();
+        let mut dormant: Vec<ItemId> = self
+            .items
+            .view_ids()
+            .into_iter()
+            .filter(|id| {
+                self.may_sleep(*id, &shown)
+                    && !self.residency.suspend_refused.contains(id)
+                    && self.idle_for(*id, self.residency.dormant_min)
+            })
+            .collect();
+        dormant.sort();
+        if dormant != self.residency.dormant_sent {
+            self.send_dormant(dormant);
+        }
+        // The grace is short next to the maintenance tick: wake when the next
+        // hidden page is due rather than up to a tick late.
+        if let Some(queue) = &self.self_queue {
+            let now = std::time::Instant::now();
+            let next = self
+                .items
+                .view_ids()
+                .into_iter()
+                .filter(|id| {
+                    self.may_sleep(*id, &shown)
+                        && !self.residency.dormant_sent.contains(id)
+                        && !self.residency.suspend_refused.contains(id)
+                })
+                .filter_map(|id| {
+                    self.last_view_activity(id)
+                        .map(|at| *at + self.residency.dormant_min)
+                })
+                .filter(|due| *due > now)
+                .min();
+            if let Some(next) = next {
+                queue.schedule_dormancy(next);
+            }
+        }
+
+        let urgent = self.discard_is_urgent(live_count);
+        let capacity = !self.residency.capacity_requests.is_empty();
+        // A suspended page is a candidate like any other once its discard
+        // grace has passed: suspension saves CPU, only a discard frees its
+        // memory. The probe below resumes it first, one wake per discard.
+        let mut candidates: Vec<ItemId> = self
+            .items
+            .view_ids()
+            .into_iter()
+            .filter(|id| {
+                !protected.contains(id)
+                    && !self.residency.discard_probes.contains_key(id)
+                    // A waiting foreground page may find a page safe now.
+                    && (capacity
+                        || self
+                            .residency
+                            .discard_protected_until
+                            .get(id)
+                            .is_none_or(|until| *until <= std::time::Instant::now()))
+                    && self.items.tab(*id).is_some_and(|tab| {
+                        tab.has_view() && !tab.loading && tab.url.is_some()
+                    })
+                    && self.wants_discard(*id, live_count, &warm)
+            })
+            .collect();
+        if urgent {
+            // Memory is needed now: free the most with the fewest reloads.
+            candidates.sort_by_key(|id| {
+                (
+                    std::cmp::Reverse(self.residency.page_bytes.get(id).copied()),
+                    self.last_view_activity(*id).copied(),
+                    *id,
+                )
+            });
+        } else {
+            candidates.sort_by_key(|id| (self.last_view_activity(*id).copied(), *id));
+        }
+
+        let available =
+            MAX_CONCURRENT_DISCARD_PROBES.saturating_sub(self.residency.discard_probes.len());
+        for id in candidates.into_iter().take(available) {
+            let Some(next) = self.residency.next_discard_probe.checked_add(1) else {
+                // Reusing a process-local correlation id could accept a very
+                // late callback. Saturation permanently disables new probes.
+                break;
+            };
+            self.residency.next_discard_probe = next;
+            let probe = DiscardProbeId(next);
+            let deadline = std::time::Instant::now() + self.residency.discard_probe_timeout;
+            let Some(committed_url) = self
+                .items
+                .tab(id)
+                .and_then(|tab| tab.url.as_ref())
+                .map(ToString::to_string)
+            else {
+                continue;
+            };
+            self.residency.discard_probes.insert(
+                id,
+                PendingDiscardProbe::Probing {
+                    probe,
+                    committed_url,
+                    deadline,
+                },
+            );
+            // A suspended WebView2 cannot reliably execute the DOM query.
+            // Replace the desired dormant set first; main-thread FIFO then
+            // guarantees resume is requested before the probe evaluation.
+            if self.residency.dormant_sent.contains(&id) {
+                let mut dormant = self.residency.dormant_sent.clone();
+                dormant.retain(|dormant| *dormant != id);
+                self.send_dormant(dormant);
+            }
+            if !self.engine.probe_discard_safety(id, probe) {
+                self.residency.discard_probes.remove(&id);
+                self.protect_discard_candidate(id);
+                continue;
+            }
+            if let Some(queue) = &self.self_queue {
+                queue.schedule_discard_probe(id, probe, deadline);
+            }
+        }
+        false
+    }
+
+    pub(super) fn discard_protected_leaves(&self) -> std::collections::HashSet<ItemId> {
+        let mut protected: std::collections::HashSet<ItemId> = self.mini_pages().collect();
+        let Some(window) = self.windows.focused() else {
+            return protected;
+        };
+        if self.active_browser_page().is_some() {
+            if let Some(id) = self.work_pane_tab() {
+                if self.item_in_scope(id, window.profile, window.space) {
+                    protected.insert(id);
+                }
+            }
+        } else if let Some(active) = window.active {
+            if self.item_in_scope(active, window.profile, window.space) {
+                protected.insert(active);
+                if let Some(tree) = &window.splits {
+                    if tree.contains(active)
+                        && self.pane_in_scope(tree, window.profile, window.space)
+                    {
+                        protected.extend(tree.tabs());
+                    }
+                }
+            }
+        }
+        protected
+    }
+
+    fn candidate_is_still_discardable(&self, id: ItemId, committed_url: &str) -> bool {
+        let live_count = self.items.view_ids().len();
+        let protected = self.discard_protected_leaves();
+        !protected.contains(&id)
+            && self.items.tab(id).is_some_and(|tab| {
+                tab.has_view()
+                    && !tab.loading
+                    && tab
+                        .url
+                        .as_ref()
+                        .is_some_and(|url| url.as_str() == committed_url)
+            })
+            && self.wants_discard(id, live_count, &self.warm_views(&protected))
+    }
+
+    /// Memory is needed now, so idle grace and the warm set no longer apply.
+    fn discard_is_urgent(&self, live_count: usize) -> bool {
+        self.residency.memory_pressure == MemoryPressure::Critical
+            || (self.residency.sleeping
+                && (!self.residency.capacity_requests.is_empty()
+                    || live_count > self.residency.live_view_pressure_limit))
+    }
+
+    /// Policy intent only; the engine probe still vetoes unsafe pages. The
+    /// user's choices are honored: kept-awake sites never sleep, and with
+    /// sleeping off only critical OS pressure, where the alternative is the
+    /// OS killing renderers outright, may still discard. A page that keeps
+    /// running is not asked: the probe would refuse it, and over and over.
+    fn wants_discard(&self, id: ItemId, live_count: usize, warm: &Warmth) -> bool {
+        if self.site_kept_awake(id, false) || self.keeps_running(id) {
+            return false;
+        }
+        if self.discard_is_urgent(live_count) {
+            return true;
+        }
+        let heavy = self
+            .residency
+            .page_bytes
+            .get(&id)
+            .is_some_and(|bytes| *bytes >= self.residency.heavy_page.0);
+        self.residency.sleeping
+            && ((!warm.warm.contains(&id) && self.idle_for(id, self.residency.idle_grace()))
+                || (heavy
+                    && warm.instant != Some(id)
+                    && self.idle_for(id, self.residency.heavy_grace())))
+    }
+
+    /// The most recently active hidden pages, kept resident for fast switching.
+    fn warm_views(&self, protected: &std::collections::HashSet<ItemId>) -> Warmth {
+        let mut hidden: Vec<ItemId> = self
+            .items
+            .view_ids()
+            .into_iter()
+            .filter(|id| !protected.contains(id))
+            .collect();
+        hidden.sort_by_key(|id| std::cmp::Reverse((self.last_view_activity(*id).copied(), *id)));
+        Warmth {
+            instant: hidden.first().copied(),
+            warm: hidden
+                .into_iter()
+                .take(self.residency.warm_view_limit)
+                .collect(),
+        }
+    }
+
+    /// Heavy pages are found by their renderer's footprint; asked for only
+    /// while something can act on the answer, at most every half minute.
+    fn sample_hidden_page_memory(&mut self, shown: &std::collections::HashSet<ItemId>) {
+        if !self.residency.sleeping && self.residency.memory_pressure == MemoryPressure::Normal {
+            return;
+        }
+        let now = std::time::Instant::now();
+        if self
+            .residency
+            .memory_sampled
+            .is_some_and(|sampled| now.duration_since(sampled) < MEMORY_SAMPLE_INTERVAL)
+        {
+            return;
+        }
+        // A sleeping page does not grow: once measured, it is not asked again.
+        let hidden: Vec<ItemId> = self
+            .items
+            .view_ids()
+            .into_iter()
+            .filter(|id| {
+                !shown.contains(id)
+                    && (!self.residency.dormant_sent.contains(id)
+                        || !self.residency.page_bytes.contains_key(id))
+            })
+            .collect();
+        if !hidden.is_empty() {
+            self.residency.memory_sampled = Some(now);
+            self.engine.sample_page_memory(hidden);
+        }
+    }
+
+    fn protect_discard_candidate(&mut self, id: ItemId) {
+        self.residency.discard_protected_until.insert(
+            id,
+            std::time::Instant::now() + self.residency.discard_protected_retry,
+        );
+    }
+
+    pub(super) fn cancel_discard_probe(&mut self, id: ItemId) {
+        match self.residency.discard_probes.get_mut(&id) {
+            Some(PendingDiscardProbe::Closing {
+                probe, recreate, ..
+            }) => {
+                // Cancel before native retirement if possible. Its exact
+                // Refused/Discarded result still owns the terminal obligation.
+                *recreate = true;
+                self.engine.cancel_discard(id, *probe);
+            }
+            Some(PendingDiscardProbe::Probing { .. }) => {
+                self.residency.discard_probes.remove(&id);
+                if let Some(queue) = &self.self_queue {
+                    queue.cancel_discard_probe(id);
+                }
+            }
+            None => {}
+        }
+    }
+
+    pub(super) fn recreate_after_inflight_discard(&mut self, id: ItemId) -> bool {
+        if let Some(PendingDiscardProbe::Closing {
+            probe, recreate, ..
+        }) = self.residency.discard_probes.get_mut(&id)
+        {
+            *recreate = true;
+            self.engine.cancel_discard(id, *probe);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub(super) fn on_discard_probe_timeout(&mut self, id: ItemId, probe: DiscardProbeId) {
+        let exact = matches!(
+            self.residency.discard_probes.get(&id),
+            Some(PendingDiscardProbe::Probing { probe: pending, .. }) if *pending == probe
+        );
+        if exact {
+            self.residency.discard_probes.remove(&id);
+            self.protect_discard_candidate(id);
+            self.maintain_views();
+        }
+    }
+
+    pub(super) fn on_discard_safety(
+        &mut self,
+        id: ItemId,
+        probe: DiscardProbeId,
+        can_discard: bool,
+    ) {
+        let Some(PendingDiscardProbe::Probing {
+            probe: pending,
+            committed_url,
+            deadline,
+        }) = self.residency.discard_probes.get(&id).cloned()
+        else {
+            return;
+        };
+        if pending != probe {
+            return;
+        }
+        if let Some(queue) = &self.self_queue {
+            queue.cancel_discard_probe(id);
+        }
+        if !can_discard
+            || deadline <= std::time::Instant::now()
+            || !self.candidate_is_still_discardable(id, &committed_url)
+        {
+            self.residency.discard_probes.remove(&id);
+            if !can_discard || deadline <= std::time::Instant::now() {
+                self.protect_discard_candidate(id);
+            }
+            self.maintain_views();
+            return;
+        }
+
+        self.residency.discard_probes.insert(
+            id,
+            PendingDiscardProbe::Closing {
+                probe,
+                recreate: false,
+                deferred_navigation: None,
+                reload_on_refusal: false,
+            },
+        );
+        // Native repeats safety/restoration checks before its physical
+        // retirement point. A refused admission leaves this view alive.
+        if !self.engine.discard_view(id, probe) {
+            if let Some(profile) = self.profile_of_item(id) {
+                self.on_view_discard_refused(id, profile, probe);
+            } else {
+                self.residency.discard_probes.remove(&id);
+                self.protect_discard_candidate(id);
+            }
+        }
+    }
+
+    pub(super) fn on_view_discard_refused(
+        &mut self,
+        id: ItemId,
+        profile: ProfileId,
+        probe: DiscardProbeId,
+    ) {
+        let Some(PendingDiscardProbe::Closing {
+            probe: pending,
+            deferred_navigation,
+            recreate,
+            reload_on_refusal,
+        }) = self.residency.discard_probes.get(&id).cloned()
+        else {
+            return;
+        };
+        if pending != probe || self.profile_of_item(id) != Some(profile) {
+            return;
+        }
+        self.residency.discard_probes.remove(&id);
+        self.protect_discard_candidate(id);
+        let effects = if let Some(input) = deferred_navigation {
+            self.items.navigate(id, &input)
+        } else if recreate || self.discard_protected_leaves().contains(&id) {
+            self.items.ensure_view(id)
+        } else {
+            Vec::new()
+        };
+        self.apply(effects);
+        if reload_on_refusal && self.items.tab(id).is_some_and(TabState::has_view) {
+            let _ = self.engine.reload(id);
+        }
+        let _ = self.relayout();
+        self.maintain_views();
+        self.project_tab(id);
+    }
+
+    pub(super) fn on_view_discarded(
+        &mut self,
+        id: ItemId,
+        profile: ProfileId,
+        probe: DiscardProbeId,
+    ) {
+        let Some(PendingDiscardProbe::Closing {
+            probe: pending,
+            recreate,
+            deferred_navigation,
+            ..
+        }) = self.residency.discard_probes.get(&id).cloned()
+        else {
+            return;
+        };
+        if pending != probe || self.profile_of_item(id) != Some(profile) {
+            return;
+        }
+        self.zoom.pending.remove(&id);
+        self.cancel_pending_presentation(id);
+        self.residency.discard_probes.remove(&id);
+        self.record_view_retirement(id);
+        if !self.items.mark_view_discarded(id) {
+            return;
+        }
+
+        let mut effects = if let Some(input) = deferred_navigation {
+            self.items.navigate(id, &input)
+        } else if recreate || self.discard_protected_leaves().contains(&id) {
+            self.items.ensure_view(id)
+        } else {
+            Vec::new()
+        };
+        // If a split/focus change happened between native acknowledgement and
+        // this actor turn, the final visibility check wins.
+        if effects.is_empty() && self.discard_protected_leaves().contains(&id) {
+            effects.extend(self.items.ensure_view(id));
+        }
+        self.apply(effects);
+        let _ = self.relayout();
+        self.maintain_views();
+        self.project_tab(id);
+    }
+
+    fn idle_for(&self, id: ItemId, min: std::time::Duration) -> bool {
+        // A fresh background page has never been focused. Its actual view
+        // residency starts the grace, without making it recently selected.
+        // Recreating a view also starts a fresh grace for that document.
+        self.last_view_activity(id)
+            .is_some_and(|time| time.elapsed() >= min)
+    }
+
+    fn last_view_activity(&self, id: ItemId) -> Option<&std::time::Instant> {
+        self.residency
+            .last_focus
+            .get(&id)
+            .into_iter()
+            .chain(self.residency.resident_since.get(&id))
+            .chain(self.residency.inactive_since.get(&id))
+            .max()
+    }
+
+    pub(super) fn record_view_creation(&mut self, id: ItemId) {
+        self.residency.inactive_since.remove(&id);
+        self.residency
+            .resident_since
+            .insert(id, std::time::Instant::now());
+    }
+
+    fn minimized_active_page(&self, id: ItemId) -> bool {
+        if self.window_visible {
+            return false;
+        }
+        let Some(window) = self.windows.focused() else {
+            return false;
+        };
+        let active = if self.active_browser_page().is_some() {
+            self.work_pane
+                .as_ref()
+                .filter(|pane| pane.window == window.id)
+                .and_then(|_| self.work_pane_tab())
+        } else {
+            window.active
+        };
+        active == Some(id) && self.item_in_scope(id, window.profile, window.space)
+    }
+
+    /// Whether a live page could be asked to sleep, idle time aside.
+    fn may_sleep(&self, id: ItemId, shown: &std::collections::HashSet<ItemId>) -> bool {
+        self.residency.sleeping
+            && !self.site_kept_awake(id, self.residency.dormant_sent.contains(&id))
+            && !self.keeps_running(id)
+            && !shown.contains(&id)
+            && !self.minimized_active_page(id)
+            && !self.residency.discard_probes.contains_key(&id)
+            && self
+                .items
+                .tab(id)
+                .is_some_and(|tab| tab.has_view() && !tab.loading && tab.url.is_some())
+    }
+
+    /// Replaces the engine's desired dormant set under a new request number.
+    fn send_dormant(&mut self, dormant: Vec<ItemId>) {
+        self.residency.dormant_request += 1;
+        let request = self.residency.dormant_request;
+        self.residency
+            .dormant_asked
+            .retain(|id, _| dormant.contains(id));
+        for id in &dormant {
+            self.residency.dormant_asked.entry(*id).or_insert(request);
+        }
+        self.residency.dormant_sent = dormant.clone();
+        self.engine.set_dormant(dormant, request);
+    }
+
+    pub(super) fn record_view_retirement(&mut self, id: ItemId) {
+        self.tab_previews.invalidate_capture(id);
+        self.residency.resident_since.remove(&id);
+        self.residency.inactive_since.remove(&id);
+        self.residency.suspend_refused.remove(&id);
+        self.forget_view_protection(id);
+    }
+
+    fn record_inactive_leaves(
+        &mut self,
+        protected: &std::collections::HashSet<ItemId>,
+        shown: &std::collections::HashSet<ItemId>,
+    ) {
+        let now = std::time::Instant::now();
+        // A visible document can be read for hours. Its background grace starts
+        // when it leaves a split/Work/foreground surface, not at activation.
+        // Minimization starts dormancy age while keeping those leaves protected
+        // from full discard; later conceptual focus changes also start a grace.
+        for id in self
+            .residency
+            .last_protected
+            .difference(protected)
+            .chain(self.residency.last_shown.difference(shown))
+        {
+            if self.items.tab(*id).is_some_and(TabState::has_view) {
+                self.residency.inactive_since.insert(*id, now);
+                if let Some(profile) = self.profile_of_item(*id) {
+                    self.residency.notifications.invalidate(profile);
+                }
+            }
+        }
+        self.residency.last_protected = protected.clone();
+        self.residency.last_shown = shown.clone();
+    }
+
+    /// A shown tab's crash is said in its pane. A hidden one (often reclaimed
+    /// by the system for memory) just sleeps and reloads when opened.
+    fn retire_crashed_view(&mut self, id: ItemId, shown: bool) {
+        // Renderer death is physical retirement proof and supersedes an
+        // unfinished discard. Its old terminal callback may never arrive.
+        self.clear_discard_after_retirement(id);
+        self.record_view_retirement(id);
+        self.zoom.pending.remove(&id);
+        self.items.mark_view_discarded(id);
+        if shown {
+            self.crash.presentations.insert(id);
+        } else {
+            self.crash.presentations.remove(&id);
+        }
+    }
+
+    fn clear_discard_after_retirement(&mut self, id: ItemId) {
+        self.residency.discard_probes.remove(&id);
+        if let Some(queue) = &self.self_queue {
+            queue.cancel_discard_probe(id);
+        }
+    }
+
+    // One automatic relaunch per crash burst: a second death inside the
+    // window means the page kills its web process deterministically, and a
+    // reload loop would peg the machine.
+    pub(super) fn on_crashed(&mut self, id: ItemId) {
+        const RETRY_WINDOW: std::time::Duration = std::time::Duration::from_secs(30);
+        if self.items.tab(id).is_none() {
+            return;
+        }
+        self.cancel_pending_presentation(id);
+        self.cancel_discard_probe(id);
+        // `Crashed` is emitted only after the engine has physically removed
+        // and revoked the exact native-view generation. Sending a second,
+        // id-only close here could be reordered behind recovery and destroy
+        // the replacement generation.
+        let active = self.windows.focused().and_then(|window| window.active);
+        // A mini window shows its page whatever the main window shows.
+        let visible =
+            active == Some(id) || self.work_pane_shows(id) || self.mini_window_of(id).is_some();
+        self.retire_crashed_view(id, visible);
+        self.items.set_loading(id, false);
+        let recent = self
+            .crash
+            .crashes
+            .insert(id, std::time::Instant::now())
+            .is_some_and(|t| t.elapsed() < RETRY_WINDOW);
+        let effects = if !recent && visible {
+            self.items.ensure_view(id)
+        } else {
+            Vec::new()
+        };
+        self.apply(effects);
+        if visible {
+            let _ = self.relayout();
+            self.maintain_views();
+        }
+        // Crash status is runtime truth, not useful session state. Avoid a
+        // full O(items) snapshot/relayout for every hidden WebKit view when a
+        // shared renderer process reports a burst of per-view terminations.
+        self.project_tab(id);
+    }
+
+    pub(super) fn on_profile_process_exit(&mut self, profile: ProfileId, ids: Vec<ItemId>) {
+        const RETRY_WINDOW: std::time::Duration = std::time::Duration::from_secs(30);
+        let visible_order: Vec<ItemId> = self
+            .visible_tree()
+            .map(|tree| tree.tabs())
+            .unwrap_or_default();
+        let mut visible: std::collections::HashSet<ItemId> =
+            visible_order.iter().copied().collect();
+        visible.extend(self.mini_pages());
+        let mut suppressed_visible = std::collections::HashSet::new();
+        let mut effects = Vec::new();
+        for id in ids {
+            if self.profile_of_item(id) != Some(profile) {
+                continue;
+            }
+            self.cancel_pending_presentation(id);
+            self.cancel_discard_probe(id);
+            let repeated = self
+                .crash
+                .crashes
+                .insert(id, std::time::Instant::now())
+                .is_some_and(|time| time.elapsed() < RETRY_WINDOW);
+            self.retire_crashed_view(id, visible.contains(&id));
+            // A browser-process loss can report hundreds of tabs at once.
+            // Recreate every currently visible split leaf, because native
+            // layout admission requires a live token for every leaf. Hidden
+            // tabs still recover lazily, avoiding a process/controller storm.
+            if visible.contains(&id) && !repeated {
+                effects.extend(self.items.ensure_view(id));
+            } else if visible.contains(&id) {
+                suppressed_visible.insert(id);
+            }
+        }
+        if self
+            .windows
+            .focused()
+            .and_then(|window| window.active)
+            .is_some_and(|active| suppressed_visible.contains(&active))
+        {
+            // A repeatedly crashing active leaf has no native token. Focus a
+            // successfully recreated sibling so layout collapses to that live
+            // leaf until the protected tab is explicitly activated again.
+            if let Some(replacement) = visible_order.into_iter().find(|id| {
+                !suppressed_visible.contains(id)
+                    && self.items.tab(*id).is_some_and(TabState::has_view)
+            }) {
+                if let Some(window) = self.windows.focused_mut() {
+                    window.active = Some(replacement);
+                }
+                self.items.set_lifecycle(replacement, Lifecycle::Active);
+                self.touch(replacement);
+            }
+        }
+        self.commit(effects);
+    }
+
+    pub(super) fn touch(&mut self, id: ItemId) {
+        self.cancel_discard_probe(id);
+        self.residency
+            .last_focus
+            .insert(id, std::time::Instant::now());
+    }
+}
+
+#[cfg(test)]
+mod notification_sleep_tests {
+    use super::*;
+
+    #[test]
+    fn a_valid_negative_refresh_does_not_wake_established_dormancy_but_invalidation_does() {
+        let now = std::time::Instant::now();
+        let profile = ProfileId::from(1);
+        let live = std::collections::HashSet::from([profile]);
+        let origin =
+            zephium_core::permissions::PageOrigin::parse_exact("https://mail.example").unwrap();
+        let mut state = NotificationSleepState {
+            native: true,
+            ..Default::default()
+        };
+        let first = state.begin(profile, false, now).unwrap();
+        state
+            .replies
+            .lock()
+            .unwrap()
+            .insert(profile, (first, Some(Default::default())));
+        state.reconcile(&live, now);
+        let refresh = state
+            .begin(profile, false, now + NOTIFICATION_REFRESH)
+            .unwrap();
+        assert!(
+            !state.keeps_awake(profile, Some(&origin), true),
+            "unchanged background refresh does not wake a dormant page"
+        );
+        assert!(
+            state.keeps_awake(profile, Some(&origin), false),
+            "fresh admission waits for the current observation"
+        );
+        state.invalidate(profile);
+        assert!(state.keeps_awake(profile, Some(&origin), true));
+        state
+            .replies
+            .lock()
+            .unwrap()
+            .insert(profile, (refresh, Some(Default::default())));
+        state.reconcile(&live, now);
+        assert!(
+            state.keeps_awake(profile, Some(&origin), true),
+            "an invalidated in-flight result cannot restore authority"
+        );
+        let fresh = state
+            .begin(profile, false, now + NOTIFICATION_REFRESH)
+            .unwrap();
+        state
+            .replies
+            .lock()
+            .unwrap()
+            .insert(profile, (fresh, Some(Default::default())));
+        state.reconcile(&live, now + NOTIFICATION_REFRESH);
+        state.next = u64::MAX;
+        assert!(state
+            .begin(profile, false, now + NOTIFICATION_REFRESH * 2)
+            .is_none());
+        assert!(
+            state.keeps_awake(profile, Some(&origin), false),
+            "generation exhaustion cannot reuse an old negative observation"
+        );
+    }
+
+    #[test]
+    fn invalidated_or_retired_native_results_cannot_restore_sleep_authority() {
+        let now = std::time::Instant::now();
+        let profile = ProfileId::from(1);
+        let mut live = std::collections::HashSet::from([profile]);
+        let mut state = NotificationSleepState {
+            native: true,
+            ..Default::default()
+        };
+        let first = state.begin(profile, false, now).unwrap();
+        state.invalidate(profile);
+        assert!(
+            state.begin(profile, false, now).is_none(),
+            "an unresolved native read retains its reservation"
+        );
+        state
+            .replies
+            .lock()
+            .unwrap()
+            .insert(profile, (first, Some(Default::default())));
+        state.reconcile(&live, now);
+        assert!(state.keeps_awake(profile, None, false));
+        let second = state.begin(profile, false, now).unwrap();
+        assert_ne!(first, second);
+        state
+            .replies
+            .lock()
+            .unwrap()
+            .insert(profile, (first, Some(Default::default())));
+        state.reconcile(&live, now);
+        assert!(
+            state.keeps_awake(profile, None, false),
+            "an old generation cannot stand in for a fresh observation"
+        );
+        state
+            .replies
+            .lock()
+            .unwrap()
+            .insert(profile, (second, Some(Default::default())));
+        state.reconcile(&live, now);
+        let origin =
+            zephium_core::permissions::PageOrigin::parse_exact("https://mail.example").unwrap();
+        assert!(!state.keeps_awake(profile, Some(&origin), false));
+        let third = state
+            .begin(profile, false, now + NOTIFICATION_REFRESH)
+            .unwrap();
+        live.clear();
+        state.reconcile(&live, now);
+        assert!(state.profiles[&profile].pending);
+        state
+            .replies
+            .lock()
+            .unwrap()
+            .insert(profile, (third, Some(Default::default())));
+        state.reconcile(&live, now);
+        assert!(state.profiles.is_empty());
+    }
+
+    #[test]
+    fn pending_notification_reads_stay_bounded_through_invalidation_and_profile_retirement() {
+        let now = std::time::Instant::now();
+        let mut state = NotificationSleepState {
+            native: true,
+            ..Default::default()
+        };
+        for id in 1..=zephium_core::session::MAX_SESSION_PROFILES {
+            assert!(state
+                .begin(ProfileId::from(id as u128), false, now)
+                .is_some());
+        }
+        for _ in 0..100 {
+            state.invalidate_all();
+            state.reconcile(&Default::default(), now);
+            assert!(state.begin(ProfileId::from(999), false, now).is_none());
+        }
+        assert_eq!(
+            state.profiles.len(),
+            zephium_core::session::MAX_SESSION_PROFILES
+        );
+        state.next = u64::MAX;
+        assert!(state.begin(ProfileId::from(999), false, now).is_none());
+    }
+}

@@ -1,0 +1,462 @@
+//! Native new-window adoption. Construct once with the original opener's native
+//! request/configuration; shell owns the logical tab and never replays its URL.
+use super::{construction::NativeViewPurpose, permits::EventPermit, EngineHost};
+use crate::navigation_epoch::NavigationActivity;
+use std::cell::Cell;
+use std::rc::Rc;
+use std::sync::atomic::Ordering;
+use wry::{NewWindowFeatures, NewWindowResponse};
+use zephium_core::geometry::Rect;
+use zephium_core::ids::ItemId;
+use zephium_core::ports::engine::EngineEvent;
+
+#[cfg(target_os = "windows")]
+mod windows_save;
+#[cfg(target_os = "windows")]
+mod windows_screenshot;
+#[cfg(target_os = "windows")]
+pub(super) use windows_save::ResourceSave;
+
+impl EngineHost {
+    #[cfg(target_os = "windows")]
+    pub(super) fn finish_windows_native_tab(&mut self, id: ItemId, attached: bool) {
+        let result = (|| {
+            if !attached {
+                return false;
+            }
+            let Some(profile) = self.partitions.get(&id).copied() else {
+                return false;
+            };
+            let Some(policy) = self.applied_content_policy(profile.profile()) else {
+                return false;
+            };
+            let Some(view) = self.views.get_mut(&id) else {
+                return false;
+            };
+            let Ok(next) = crate::platform::imp::install_scoped_content_policy_on_view(
+                &view.view,
+                &policy,
+                &view.site_scope.pause,
+                &view.site_scope.protection,
+                &view.site_scope.top_document,
+            ) else {
+                return false;
+            };
+            let previous = view.content_policy_registration.replace(next);
+            if previous.is_some_and(|previous| previous.retire().is_err()) {
+                self.fail_content_policy_retirement();
+                return false;
+            }
+            true
+        })();
+        if !result {
+            let token = self
+                .views
+                .get(&id)
+                .and_then(|view| view.event_permit.active_token());
+            self.close(id);
+            if let Some(token) = token {
+                self.sink
+                    .emit_for(token, EngineEvent::ViewCreationFailed { id });
+            }
+        }
+    }
+
+    pub(crate) fn finish_native_tab_adoption(
+        &mut self,
+        id: ItemId,
+        token: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) {
+        if !self
+            .views
+            .get(&id)
+            .is_some_and(|view| view.event_permit.matches_token(token))
+        {
+            return;
+        }
+        self.finish_new_view_insertion(id, token);
+        let facts = self.views.get(&id).and_then(|view| {
+            view.navigation.current_committed().map(|epoch| {
+                (
+                    view.event_permit.clone(),
+                    view.navigation.clone(),
+                    epoch,
+                    view.title_ready == Some(epoch),
+                )
+            })
+        });
+        if let Some((permit, navigation, epoch, finished)) = facts {
+            if self.emit_navigation_observation(id, &permit, &navigation, epoch) {
+                if finished {
+                    self.complete_title_attribution(id, &permit, &navigation, epoch);
+                }
+                self.emit_navigation_ready(id, &permit, &navigation, epoch);
+            }
+        }
+    }
+
+    pub(super) fn open_native_tab(
+        &mut self,
+        source: ItemId,
+        permit: &EventPermit,
+        activity: NavigationActivity,
+        url: &str,
+        features: NewWindowFeatures,
+        clicked: bool,
+    ) -> NewWindowResponse {
+        if !features.user_initiated || !permit.allows_target(url) {
+            return NewWindowResponse::Deny;
+        }
+        let Some(view) = self.views.get(&source) else {
+            return NewWindowResponse::Deny;
+        };
+        if !view.event_permit.same_generation(permit)
+            || !view.navigation.matches_activity(activity)
+            || !view.presentation_permit.load(Ordering::Acquire)
+            || !view.download_surface_intent.load(Ordering::Acquire)
+        {
+            return NewWindowResponse::Deny;
+        }
+        if permit.active_token().is_none() {
+            return NewWindowResponse::Deny;
+        }
+        let Some(partition) = self.partitions.get(&source).copied() else {
+            return NewWindowResponse::Deny;
+        };
+        if self.erasure_tombstones.contains(&partition.profile()) {
+            return NewWindowResponse::Deny;
+        }
+        #[cfg(target_os = "macos")]
+        {
+            use objc2::rc::Retained;
+            use wry::WebViewExtMacOS;
+            let observed = view.view.webview();
+            if Retained::as_ptr(&observed).cast::<()>()
+                != Retained::as_ptr(&features.opener.webview).cast::<()>()
+                || !crate::platform::imp::home_window(&observed)
+                    .is_some_and(|window| window.isVisible() && window.isKeyWindow())
+            {
+                return NewWindowResponse::Deny;
+            }
+        }
+        #[cfg(target_os = "windows")]
+        {
+            use windows::core::Interface;
+            use windows::Win32::Foundation::HWND;
+            use windows::Win32::UI::WindowsAndMessaging::{
+                GetAncestor, GetForegroundWindow, GA_ROOT,
+            };
+            use wry::WebViewExtWindows;
+            if view.view.webview().as_raw() != features.opener.webview.as_raw() {
+                return NewWindowResponse::Deny;
+            }
+            let mut parent = HWND::default();
+            if unsafe { view.view.controller().ParentWindow(&mut parent) }.is_err()
+                || unsafe { GetAncestor(parent, GA_ROOT) != GetForegroundWindow() }
+            {
+                return NewWindowResponse::Deny;
+            }
+        }
+        self.adopt_native_tab(source, permit, activity, url, features, clicked, || true)
+    }
+
+    /// Both callers authenticate their native opener first. Preserve WebView2's
+    /// original request (including OAuth state); never replay just its URL.
+    /// `clicked` is the person's click, not an allowed site's own opening.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn adopt_native_tab(
+        &mut self,
+        source: ItemId,
+        permit: &EventPermit,
+        activity: NavigationActivity,
+        url: &str,
+        features: NewWindowFeatures,
+        clicked: bool,
+        opener_current: impl Fn() -> bool,
+    ) -> NewWindowResponse {
+        let Some(token) = permit.active_token() else {
+            return NewWindowResponse::Deny;
+        };
+        let Some(partition) = self.partitions.get(&source).copied() else {
+            return NewWindowResponse::Deny;
+        };
+        let child = ItemId::generate();
+        let Some(active) =
+            self.native_open_authority
+                .reserve(source, &token, child, partition.profile())
+        else {
+            return NewWindowResponse::Deny;
+        };
+        let adoption = self.native_open_authority.adoption(child, active.clone());
+        let foreground = features.foreground;
+        self.native_tab_download_ask =
+            self.views
+                .get(&source)
+                .map(|view| super::downloads::SiteAsk {
+                    item: Rc::new(Cell::new(source)),
+                    permit: view.event_permit.clone(),
+                    sink: self.sink.clone(),
+                    site: super::construction::committed_origin(&view.navigation),
+                    opened_by_click: clicked,
+                });
+        let built = self.build_view(
+            Rc::new(Cell::new(child)),
+            partition,
+            url,
+            Rect::default(),
+            EventPermit::bound(&active),
+            NativeViewPurpose::NativeTab(features.opener),
+        );
+        self.native_tab_download_ask = None;
+        let Some(view) = built else {
+            self.native_open_authority.release_failed(child, &active);
+            return NewWindowResponse::Deny;
+        };
+        if !opener_current()
+            || !token.load(Ordering::Acquire)
+            || !active.load(Ordering::Acquire)
+            || !self.views.get(&source).is_some_and(|view| {
+                view.event_permit.same_generation(permit)
+                    && view.navigation.matches_activity(activity)
+            })
+        {
+            drop(view);
+            self.native_open_authority.release_failed(child, &active);
+            return NewWindowResponse::Deny;
+        }
+        #[cfg(target_os = "macos")]
+        let native = {
+            use objc2::rc::Retained;
+            use wry::WebViewExtMacOS;
+            let value = view.view.webview();
+            Retained::clone(&value).into_super()
+        };
+        #[cfg(target_os = "windows")]
+        let native = {
+            use wry::WebViewExtWindows;
+            view.view.webview()
+        };
+        #[cfg(target_os = "windows")]
+        let guarded_controller = {
+            use wry::WebViewExtWindows;
+            view.view.controller()
+        };
+        #[cfg(target_os = "windows")]
+        let guarded_permit = view.event_permit.clone();
+        #[cfg(target_os = "windows")]
+        let guarded_failure = self.native_terminal_failure.clone();
+        #[cfg(target_os = "macos")]
+        crate::platform::imp::set_background_suspension(&view.view, false);
+        self.partitions.insert(child, partition);
+        self.views.insert(child, view);
+        permit.emit(
+            &self.sink,
+            EngineEvent::NativeTabOpened {
+                id: source,
+                child,
+                foreground,
+                adoption,
+            },
+        );
+        #[cfg(target_os = "macos")]
+        {
+            NewWindowResponse::Create { webview: native }
+        }
+        #[cfg(target_os = "windows")]
+        {
+            NewWindowResponse::CreateGuarded {
+                webview: native,
+                attached: Box::new(move |success| {
+                    if !super::dispatch::finish_windows_native_tab(child, success) {
+                        // Never complete a new-window deferral with an
+                        // unattested controller when host ownership reenters.
+                        guarded_permit.revoke();
+                        unsafe {
+                            let _ = guarded_controller.Close();
+                        }
+                        guarded_failure("native popup post-attachment ownership was unavailable");
+                    }
+                }),
+            }
+        }
+    }
+
+    pub(crate) fn show_bg_toast(&self, id: ItemId, y: f64) {
+        let Some(view) = self.views.get(&id) else {
+            return;
+        };
+        let top = if y.is_finite() { (y - 8.0).max(16.0) } else { 32.0 };
+        let script = format!(
+            r#"(function(targetY){{
+  try {{
+    var old = document.getElementById('__aether_bg_toast');
+    if (old) old.remove();
+    var y = Math.min(Math.max(targetY, 18), Math.max(18, window.innerHeight - 44));
+    var box = document.createElement('div');
+    box.id = '__aether_bg_toast';
+    var arrow = document.createElement('span');
+    arrow.textContent = '\u2190';
+    arrow.style.cssText = 'color:#38bdf8;font-weight:700;margin-right:6px;';
+    box.appendChild(arrow);
+    box.appendChild(document.createTextNode('Yeni sekme açıldı'));
+    box.style.cssText = 'position:fixed;z-index:2147483647;pointer-events:none;' +
+      'left:10px;top:' + Math.round(y) + 'px;' +
+      'transform:translate(-8px,-50%) scale(0.96);opacity:0;' +
+      'display:inline-flex;align-items:center;' +
+      'padding:7px 13px;border-radius:10px;' +
+      'background:rgba(15,19,28,0.92);color:#f1f5f9;' +
+      'border:1px solid rgba(56,189,248,0.42);' +
+      'box-shadow:0 8px 26px rgba(0,0,0,0.44);' +
+      'font:600 12px/1.2 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;' +
+      'backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);' +
+      'transition:opacity 160ms ease,transform 190ms cubic-bezier(.2,.8,.2,1);';
+    (document.body || document.documentElement).appendChild(box);
+    requestAnimationFrame(function(){{
+      box.style.opacity = '1';
+      box.style.transform = 'translate(0,-50%) scale(1)';
+    }});
+    setTimeout(function(){{
+      box.style.opacity = '0';
+      box.style.transform = 'translate(-6px,-50%) scale(0.96)';
+      setTimeout(function(){{ if (box.parentNode) box.remove(); }}, 200);
+    }}, 1500);
+  }} catch(_) {{}}
+}})({top});"#
+        );
+        let _ = view.view.evaluate_script(&script);
+    }
+}
+
+#[cfg(target_os = "windows")]
+pub(super) fn windows_context_foreground(
+    permit: &EventPermit,
+    presented: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    controller: &webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Controller,
+) -> bool {
+    use windows::Win32::{
+        Foundation::HWND,
+        UI::WindowsAndMessaging::{GetAncestor, GetForegroundWindow, GA_ROOT},
+    };
+    let mut parent = HWND::default();
+    permit.active_token().is_some()
+        && presented.load(Ordering::Acquire)
+        && unsafe { controller.ParentWindow(&mut parent) }.is_ok()
+        && unsafe { GetAncestor(parent, GA_ROOT) == GetForegroundWindow() }
+}
+
+#[cfg(target_os = "windows")]
+pub(super) fn filter_windows_context_menu(
+    source: &std::rc::Rc<std::cell::Cell<ItemId>>,
+    permit: &EventPermit,
+    sink: &super::Sink,
+    navigation: &crate::navigation_epoch::NavigationEpochTracker,
+    presented: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    controller: &webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Controller,
+    args:&webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2ContextMenuRequestedEventArgs,
+) -> bool {
+    use windows::{core::PWSTR, Win32::System::Com::CoTaskMemFree};
+    let Some(activity) = navigation.activity_snapshot() else {
+        return false;
+    };
+    if !windows_context_foreground(permit, presented, controller) {
+        return false;
+    }
+    let Ok(items) = (unsafe { args.MenuItems() }) else {
+        return false;
+    };
+    let mut count = 0;
+    if unsafe { items.Count(&mut count) }.is_err() || count > 64 {
+        return false;
+    }
+    for index in (0..count).rev() {
+        let Ok(item) = (unsafe { items.GetValueAtIndex(index) }) else {
+            return false;
+        };
+        let mut name = PWSTR::null();
+        if unsafe { item.Name(&mut name) }.is_err() {
+            unsafe { CoTaskMemFree(Some(name.0.cast())) };
+            return false;
+        }
+        let text = if name.is_null() {
+            None
+        } else {
+            (0..=128)
+                .find(|offset| unsafe { *name.0.add(*offset) } == 0)
+                .and_then(|len| {
+                    String::from_utf16(unsafe { std::slice::from_raw_parts(name.0, len) }).ok()
+                })
+        };
+        unsafe { CoTaskMemFree(Some(name.0.cast())) };
+        if !text.as_deref().is_some_and(windows_menu_item_allowed)
+            && unsafe { items.RemoveValueAtIndex(index) }.is_err()
+        {
+            return false;
+        }
+    }
+    let ok = navigation.matches_activity(activity)
+        && windows_context_foreground(permit, presented, controller);
+    if ok {
+        windows_screenshot::inject_custom_items(source, permit, sink, controller, args);
+    }
+    ok
+}
+#[cfg(any(target_os = "windows", test))]
+pub(super) fn windows_menu_item_allowed(name: &str) -> bool {
+    matches!(
+        name,
+        "back"
+            | "forward"
+            | "reload"
+            | "undo"
+            | "redo"
+            | "cut"
+            | "copy"
+            | "paste"
+            | "pasteAndMatchStyle"
+            | "selectAll"
+            | "copyLinkLocation"
+            | "copyImage"
+            | "copyImageLocation"
+            | "saveImageAs"
+            | "saveLinkAs"
+            | "saveVideoAs"
+            | "saveAudioAs"
+            | "saveMediaAs"
+            | "copyLink"
+            | "loop"
+            | "showAllControls"
+            // This is the runtime's unlocalized command name, including its typo.
+            | "pictureInPciture"
+            | "pictureInPicture"
+            | "openLinkInNewWindow"
+            | "openLinkInNewTab"
+            | "openImageInNewWindow"
+            | "openImageInNewTab"
+            | "inspectElement"
+            // WebView2 owns the installed extension's submenu and dispatch.
+            // Keep it intact after the same foreground/document checks above.
+            | "extension"
+    )
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn native_windows_context_menu_keeps_file_actions_but_denies_unbrokered_surfaces() {
+        assert!(windows_menu_item_allowed("saveImageAs"));
+        assert!(windows_menu_item_allowed("copyLinkLocation"));
+        assert!(windows_menu_item_allowed("extension"));
+        assert!(windows_menu_item_allowed("inspectElement"));
+        assert!(windows_menu_item_allowed("pictureInPciture"));
+        assert!(windows_menu_item_allowed("saveMediaAs"));
+        for name in [
+            "print",
+            "savePageAs",
+            "share",
+            "unknownFutureCommand",
+            "custom",
+        ] {
+            assert!(!windows_menu_item_allowed(name));
+        }
+    }
+}

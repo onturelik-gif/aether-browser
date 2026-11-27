@@ -1,0 +1,238 @@
+//! Release-owned composition for authenticated blocker sources and caches.
+
+use std::path::Path;
+use std::sync::Arc;
+
+use zephium_blocker::CompiledArtifactCacheConfig;
+use zephium_blocker_service::{
+    EmbeddedReleaseAsset, LicensePolicy, ManagedBlocker, ReleaseCatalogSeed, UpdateLimits,
+};
+
+const COMPILED_CACHE_DIRECTORY: &str = "blocker-compiled-v1";
+const RELEASE_SEED_LICENSES: [&str; 2] = ["CC-BY-SA-3.0", "GPL-3.0-only"];
+const RELEASE_SEED_MAX_MANIFEST_BYTES: usize = 16 * 1024;
+const RELEASE_SEED_MAX_SOURCE_BYTES: u64 = 4 * 1024 * 1024;
+const RELEASE_SEED_MAX_TOTAL_SOURCE_BYTES: u64 = 8 * 1024 * 1024;
+
+const RELEASE_SEED_CATALOG: &[u8] = include_bytes!("../../assets/blocker-seed/v1/catalog.json");
+const RELEASE_SEED_ENVELOPE: &[u8] =
+    include_bytes!("../../assets/blocker-seed/v1/release-seed.json");
+const RELEASE_SEED_EASYLIST: &[u8] = include_bytes!("../../assets/blocker-seed/v1/easylist.txt.gz");
+const RELEASE_SEED_EASYPRIVACY: &[u8] =
+    include_bytes!("../../assets/blocker-seed/v1/easyprivacy.txt.gz");
+const RELEASE_SEED_UBLOCK_FILTERS: &[u8] =
+    include_bytes!("../../assets/blocker-seed/v1/ublock-filters.txt.gz");
+const RELEASE_SEED_UBLOCK_QUICK_FIXES: &[u8] =
+    include_bytes!("../../assets/blocker-seed/v1/ublock-quick-fixes.txt.gz");
+const RELEASE_SEED_UBLOCK_LINK_SHORTENERS: &[u8] =
+    include_bytes!("../../assets/blocker-seed/v1/ublock-link-shorteners.txt.gz");
+const RELEASE_SEED_UBLOCK_PRIVACY: &[u8] =
+    include_bytes!("../../assets/blocker-seed/v1/ublock-privacy.txt.gz");
+const RELEASE_SEED_UBLOCK_RESOURCE_ABUSE: &[u8] =
+    include_bytes!("../../assets/blocker-seed/v1/ublock-resource-abuse.txt.gz");
+const RELEASE_SEED_UBLOCK_UNBREAK: &[u8] =
+    include_bytes!("../../assets/blocker-seed/v1/ublock-unbreak.txt.gz");
+const RELEASE_SEED_UBLOCK_BADWARE: &[u8] =
+    include_bytes!("../../assets/blocker-seed/v1/ublock-badware.txt.gz");
+
+pub(crate) fn start_with_updates(
+    data_dir: &Path,
+    validate: zephium_blocker_service::NativeRuleValidator,
+) -> std::io::Result<Arc<ManagedBlocker>> {
+    let artifact_cache = CompiledArtifactCacheConfig::new(data_dir.join(COMPILED_CACHE_DIRECTORY))
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
+    ManagedBlocker::with_official_updates(
+        bundled_release_seed()?,
+        artifact_cache,
+        data_dir.join("blocker-official-v1"),
+        validate,
+    )
+}
+
+/// The compiled WebKit lists the blocker's cache names, such as a list update
+/// checked before the last exit, so the engine keeps them instead of
+/// collecting and compiling them again.
+pub(crate) fn cached_webkit_digests(data_dir: &Path) -> Vec<[u8; 32]> {
+    CompiledArtifactCacheConfig::new(data_dir.join(COMPILED_CACHE_DIRECTORY))
+        .map(|cache| cache.cached_webkit_artifact_digests())
+        .unwrap_or_default()
+}
+
+#[cfg(test)]
+pub(crate) fn start_seed_only(data_dir: &Path) -> std::io::Result<Arc<ManagedBlocker>> {
+    let artifact_cache = CompiledArtifactCacheConfig::new(data_dir.join(COMPILED_CACHE_DIRECTORY))
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
+    ManagedBlocker::with_release_seed(bundled_release_seed()?, artifact_cache)
+}
+
+fn bundled_release_seed() -> std::io::Result<ReleaseCatalogSeed> {
+    release_seed_from_embedded(
+        RELEASE_SEED_CATALOG,
+        RELEASE_SEED_ENVELOPE,
+        embedded_release_assets(),
+    )
+}
+
+fn release_seed_from_embedded(
+    catalog: &'static [u8],
+    envelope: &'static [u8],
+    assets: Vec<EmbeddedReleaseAsset>,
+) -> std::io::Result<ReleaseCatalogSeed> {
+    let limits = UpdateLimits {
+        max_manifest_bytes: RELEASE_SEED_MAX_MANIFEST_BYTES,
+        max_sources: 9,
+        max_source_bytes: RELEASE_SEED_MAX_SOURCE_BYTES,
+        max_total_source_bytes: RELEASE_SEED_MAX_TOTAL_SOURCE_BYTES,
+        ..UpdateLimits::default()
+    };
+    let licenses = LicensePolicy::new(RELEASE_SEED_LICENSES)
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
+    ReleaseCatalogSeed::from_embedded_gzip(catalog, envelope, assets, limits, licenses)
+        .map_err(|error| std::io::Error::other(format!("invalid embedded blocker seed: {error}")))
+}
+
+fn embedded_release_assets() -> Vec<EmbeddedReleaseAsset> {
+    vec![
+        EmbeddedReleaseAsset::new("easylist.txt", RELEASE_SEED_EASYLIST),
+        EmbeddedReleaseAsset::new("easyprivacy.txt", RELEASE_SEED_EASYPRIVACY),
+        EmbeddedReleaseAsset::new("ublock-filters.txt", RELEASE_SEED_UBLOCK_FILTERS),
+        EmbeddedReleaseAsset::new("ublock-quick-fixes.txt", RELEASE_SEED_UBLOCK_QUICK_FIXES),
+        EmbeddedReleaseAsset::new(
+            "ublock-link-shorteners.txt",
+            RELEASE_SEED_UBLOCK_LINK_SHORTENERS,
+        ),
+        EmbeddedReleaseAsset::new("ublock-privacy.txt", RELEASE_SEED_UBLOCK_PRIVACY),
+        EmbeddedReleaseAsset::new(
+            "ublock-resource-abuse.txt",
+            RELEASE_SEED_UBLOCK_RESOURCE_ABUSE,
+        ),
+        EmbeddedReleaseAsset::new("ublock-unbreak.txt", RELEASE_SEED_UBLOCK_UNBREAK),
+        EmbeddedReleaseAsset::new("ublock-badware.txt", RELEASE_SEED_UBLOCK_BADWARE),
+    ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    use zephium_core::blocker::{BlockerConfig, ContentPolicyGeneration};
+    use zephium_core::ids::ProfileId;
+    use zephium_core::ports::blocker::{
+        BlockerCatalog, BlockerCatalogPhase, BlockerCatalogProvenance,
+        BlockerCatalogRefreshDispatch, BlockerCompileOutcome, BlockerCompiler, BlockerDispatch,
+        BlockerShutdownOutcome,
+    };
+
+    #[test]
+    fn exact_production_release_seed_is_admitted_by_the_runtime_loader() {
+        let seed = bundled_release_seed().unwrap();
+        let identity = seed.identity();
+        assert_eq!(identity.revision, 202_611_172_316);
+        assert_eq!(identity.source_count, 9);
+        assert_eq!(identity.source_bytes, 6_236_712);
+        assert_eq!(
+            identity.manifest_sha256,
+            [
+                0x8f, 0xe2, 0x05, 0x7e, 0x62, 0xb8, 0x58, 0xa1, 0x7d, 0xfd, 0x91, 0x59, 0x1b, 0x42,
+                0xcf, 0xb6, 0xad, 0x3d, 0xc9, 0xc7, 0xff, 0x2f, 0xd5, 0x94, 0x21, 0x14, 0x80, 0xd7,
+                0x85, 0x34, 0x74, 0xe4
+            ]
+        );
+    }
+
+    #[test]
+    fn malformed_embedded_seed_is_a_startup_error() {
+        static MALFORMED_ENVELOPE: &[u8] = b"{}";
+        let error = release_seed_from_embedded(
+            RELEASE_SEED_CATALOG,
+            MALFORMED_ENVELOPE,
+            embedded_release_assets(),
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "invalid embedded blocker seed: release seed envelope is invalid"
+        );
+    }
+
+    #[test]
+    fn release_seed_is_authoritative_but_not_network_refreshable() {
+        let root = tempfile::tempdir().unwrap();
+        let service = start_seed_only(root.path()).unwrap();
+        let snapshot = service.maintain();
+
+        assert_eq!(snapshot.phase, BlockerCatalogPhase::Fresh);
+        assert_eq!(snapshot.package_stale, Some(false));
+        assert_eq!(snapshot.package_revision, Some(202_611_172_316));
+        assert_eq!(
+            snapshot.package_provenance,
+            Some(BlockerCatalogProvenance::ReleaseBundle)
+        );
+        assert_eq!(snapshot.installed_revision, snapshot.package_revision);
+        assert_eq!(
+            snapshot.installed_provenance,
+            Some(BlockerCatalogProvenance::ReleaseBundle)
+        );
+        assert!(!snapshot.refresh_supported);
+        assert_eq!(
+            service.request_refresh(),
+            BlockerCatalogRefreshDispatch::Unsupported
+        );
+        assert_eq!(
+            service.shutdown_until(Instant::now() + Duration::from_secs(2)),
+            BlockerShutdownOutcome::Clean
+        );
+    }
+
+    #[test]
+    fn exact_production_release_seed_materializes_through_the_worker() {
+        let root = tempfile::tempdir().unwrap();
+        let service = start_seed_only(root.path()).unwrap();
+        let (completed, completion) = std::sync::mpsc::sync_channel(1);
+
+        assert_eq!(
+            service.compile(
+                ProfileId::from(1),
+                ContentPolicyGeneration::new(1).unwrap(),
+                BlockerConfig { enabled: true },
+                Box::new(move |outcome| completed.send(outcome).unwrap()),
+            ),
+            BlockerDispatch::Scheduled
+        );
+        let BlockerCompileOutcome::Compiled(rules) = completion
+            .recv_timeout(Duration::from_secs(60))
+            .expect("the exact bundled lists must compile within the bounded test deadline")
+        else {
+            panic!("the exact bundled lists were rejected by the production loader");
+        };
+        assert!(rules.enabled());
+        assert!(rules.coverage().has_blocking_entries());
+        // Zephium's own eight exceptions compile with the lists where requests
+        // carry their page; on Windows that is the view's main document. The
+        // Windows matcher drops the regex rules its regex engine cannot compile.
+        // Its YouTube marker rule is a source rule the network matcher does not
+        // take.
+        let own = 8;
+        let marker = 1;
+        let accepted = if cfg!(target_os = "windows") {
+            117_028
+        } else {
+            117_060
+        };
+        assert_eq!(rules.coverage().source_rules, 168_731 + own + marker);
+        assert_eq!(rules.coverage().accepted_rules, accepted + own);
+        // The quick fixes keep their trust: the marker and the edits it is
+        // keyed on both reach the page.
+        let program = rules
+            .cosmetics()
+            .and_then(|cosmetics| cosmetics.scriptlet_program())
+            .expect("the bundled lists have scriptlets");
+        assert!(program.contains("zephiumPlayerMarker(\"oaeb channel yahi inline\""));
+        assert!(program.contains("zephiumTrustedEditInboundObject(\"JSON.stringify\""));
+        assert_eq!(
+            service.shutdown_until(Instant::now() + Duration::from_secs(10)),
+            BlockerShutdownOutcome::Clean
+        );
+    }
+}

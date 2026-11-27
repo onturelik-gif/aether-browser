@@ -1,0 +1,346 @@
+//! WebKit (`WKWebExtension`) runtime for Chrome extensions on macOS.
+//!
+//! The browser owns installation, consent and its tab model; this crate owns
+//! everything between those and WebKit: one controller per profile, loading
+//! contexts, the tab graph WebKit sees, popups, and the native half of the
+//! compatibility layer that `zephium_webext::prepare` injects into packages.
+#![cfg(target_os = "macos")]
+
+mod access;
+mod api;
+mod auth;
+mod background;
+mod bookmarks;
+mod bridge;
+pub mod compat;
+mod cookies;
+mod data;
+mod delegate;
+mod downloads;
+mod events;
+mod history;
+mod idle;
+mod json;
+mod lifetime;
+mod native;
+mod notifications;
+mod offscreen;
+mod page_script;
+mod privacy;
+mod runtime;
+mod sessions;
+mod socket;
+mod surface;
+mod top_sites;
+
+use std::ffi::CStr;
+use std::sync::OnceLock;
+
+use objc2::rc::Retained;
+use objc2_foundation::{
+    NSError, NSLocalizedDescriptionKey, NSMutableDictionary, NSOperatingSystemVersion,
+    NSProcessInfo, NSString,
+};
+
+pub use api::BROWSER_PERMISSIONS;
+pub use auth::{AuthAnswer, AuthDetails};
+pub use downloads::{DownloadAnswer, DownloadItem, DownloadRequest};
+pub use page_script::PageScript;
+pub use runtime::{ExtensionSpec, Grants, LoadedExtension, Runtime};
+
+/// WebKit's extension runtime requires macOS 15.4 or later.
+pub fn supported() -> bool {
+    NSProcessInfo::processInfo().isOperatingSystemAtLeastVersion(NSOperatingSystemVersion {
+        majorVersion: 15,
+        minorVersion: 4,
+        patchVersion: 0,
+    })
+}
+
+/// Looks up an NSString constant exported by the loaded system WebKit.
+/// Missing symbols and null constants are unavailable on older systems.
+fn webkit_string(name: &CStr) -> Option<&'static NSString> {
+    #[cfg(test)]
+    if MISSING_WEBKIT_STRING.with(|missing| missing.get() == Some(name)) {
+        return None;
+    }
+    // SAFETY: callers pass only names of WebKit's process-lifetime NSString
+    // constants. dlsym returns the address of the pointer, not the object.
+    unsafe {
+        let symbol = libc::dlsym(libc::RTLD_DEFAULT, name.as_ptr()).cast::<*const NSString>();
+        symbol.as_ref().and_then(|value| value.as_ref())
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static MISSING_WEBKIT_STRING: std::cell::Cell<Option<&'static CStr>> = const {
+        std::cell::Cell::new(None)
+    };
+}
+
+#[cfg(test)]
+fn without_webkit_string<T>(name: &'static CStr, run: impl FnOnce() -> T) -> T {
+    struct Restore(Option<&'static CStr>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            MISSING_WEBKIT_STRING.with(|missing| missing.set(self.0));
+        }
+    }
+    let _restore = Restore(MISSING_WEBKIT_STRING.with(|missing| missing.replace(Some(name))));
+    run()
+}
+
+/// A readable message for any error WebKit reports.
+pub fn describe_error(error: &NSError) -> String {
+    runtime::describe(Some(error))
+}
+pub use surface::{TabSnapshot, WindowSnapshot};
+
+/// Where an extension's diagnostic came from and how serious it is.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LogLevel {
+    Info,
+    Warning,
+    Error,
+}
+
+/// A change an extension asked the browser to make to its tabs or windows.
+#[derive(Clone, Debug, PartialEq)]
+pub enum TabRequest {
+    Create {
+        window: Option<u64>,
+        url: Option<String>,
+        active: bool,
+        pinned: bool,
+        index: Option<usize>,
+    },
+    Activate {
+        tab: u64,
+    },
+    Close {
+        tab: u64,
+    },
+    Load {
+        tab: u64,
+        url: String,
+    },
+    Reload {
+        tab: u64,
+        bypass_cache: bool,
+    },
+    Back {
+        tab: u64,
+    },
+    Forward {
+        tab: u64,
+    },
+    Pin {
+        tab: u64,
+        pinned: bool,
+    },
+    FocusWindow {
+        window: u64,
+    },
+    /// Done with the copy.
+    Duplicate {
+        tab: u64,
+    },
+    Mute {
+        tab: u64,
+        muted: bool,
+    },
+    /// `None` restores the browser's default level.
+    Zoom {
+        tab: u64,
+        factor: Option<f64>,
+    },
+    /// Puts `tabs`, in order, before `before` in their window, or last.
+    Move {
+        tabs: Vec<u64>,
+        before: Option<u64>,
+    },
+}
+
+/// Completion for a [`TabRequest`]: the created or affected tab, or a message
+/// the extension receives as `runtime.lastError`.
+pub type TabRequestDone = Box<dyn FnOnce(Result<Option<u64>, String>)>;
+
+/// What the browser provides to the runtime. Every call arrives on the main
+/// thread.
+/// Access an extension asked for at run time, with the warnings to show.
+#[derive(Clone, Debug)]
+pub struct AccessRequest {
+    pub extension: String,
+    pub warnings: Vec<String>,
+    pub permissions: Vec<String>,
+    pub patterns: Vec<String>,
+}
+
+pub trait Host {
+    fn log(&self, extension: &str, level: LogLevel, message: &str);
+
+    /// Applies a tab change. A created tab must be published through
+    /// [`Runtime::publish`] before `done` reports it.
+    fn tab_request(&self, request: TabRequest, done: TabRequestDone);
+
+    /// Runs `identity.launchWebAuthFlow`: shows `url` and reports the
+    /// `https://<extension>.chromiumapp.org/…` address the provider redirects
+    /// to, or why there is none.
+    fn start_auth_flow(
+        &self,
+        extension: &str,
+        url: &str,
+        done: Box<dyn FnOnce(Result<String, String>)>,
+    );
+
+    /// Opens an extension's options page, as `runtime.openOptionsPage` asks.
+    fn open_options(&self, extension: &str, url: &str);
+
+    /// Shows WebKit's popup for an extension's action (its `popupPopover`, or
+    /// its `popupWebView` in a view of the host's own). Returning false
+    /// declines it, and WebKit closes the popup.
+    fn present_popup(&self, extension: &str, action: &objc2_web_kit::WKWebExtensionAction) -> bool;
+
+    /// Asks the user whether `extension` may have access it requested at run
+    /// time (`permissions.request`): API permissions and match patterns,
+    /// batched into one question. Declines unless the host asks.
+    fn prompt_access(&self, request: AccessRequest, done: Box<dyn FnOnce(bool)>) {
+        let _ = request;
+        done(false);
+    }
+
+    /// The extension gave up access it had (`permissions.remove`); the host
+    /// keeps it from being granted again on the next start.
+    fn access_removed(&self, extension: &str, permissions: &[String], patterns: &[String]) {
+        let _ = (extension, permissions, patterns);
+    }
+
+    /// Whether the browser should offer its own password filling in this
+    /// profile; password managers turn it off through `chrome.privacy`.
+    fn password_filling_changed(&self, enabled: bool) {
+        let _ = enabled;
+    }
+
+    /// An extension changed its toolbar action as shown in a window's active
+    /// tab (or its default, which every tab without its own follows).
+    fn action_changed(&self, extension: &str) {
+        let _ = extension;
+    }
+
+    /// Reads or changes the profile's history, bookmarks or closed tabs for
+    /// an extension holding the permission. Answers `Unavailable` unless the
+    /// host keeps such data.
+    fn browser_data(
+        &self,
+        extension: &str,
+        call: zephium_core::extension_data::ExtensionDataCall,
+        done: Box<dyn FnOnce(zephium_core::extension_data::ExtensionDataReply)>,
+    ) {
+        let _ = (extension, call);
+        done(zephium_core::extension_data::ExtensionDataReply::Unavailable);
+    }
+
+    /// Runs a `chrome.downloads` request through the browser's download
+    /// manager. Declines unless the host has one.
+    fn downloads(
+        &self,
+        request: DownloadRequest,
+        done: Box<dyn FnOnce(Result<DownloadAnswer, String>)>,
+    ) {
+        let _ = request;
+        done(Err("Downloads are not available.".into()));
+    }
+
+    /// Which data changes extensions now listen to; the host reports them
+    /// through [`Runtime::data_changed`].
+    fn data_interest(&self, interest: zephium_core::extension_data::ExtensionDataInterest) {
+        let _ = interest;
+    }
+}
+
+/// Closes the bridges an extension's worker opened. WebKit numbers message
+/// ports per web process and never reports that a worker ended, so a port
+/// left open from a previous worker ends up carrying messages into an
+/// unrelated port of the next one (the next WebSocket's first message was an
+/// old connection's ping).
+pub(crate) fn worker_gone(shared: &runtime::Shared, extension: &str) {
+    socket::close_extension(shared, extension);
+    events::worker_gone(shared, extension);
+    native::close_extension(shared, extension);
+}
+
+/// Diagnostics for development builds: `ZEPHIUM_WEBEXT_TRACE=1` prints how
+/// tabs bind to views and the shape (never the content) of bridged frames.
+pub fn tracing() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("ZEPHIUM_WEBEXT_TRACE").is_some_and(|v| v == "1"))
+}
+
+/// The application name every web view in the browser must share.
+///
+/// WebKit runs service workers with the user agent of the page that loaded
+/// most recently and restarts them when it differs, so a view with its own
+/// user agent stops every extension's background. Extensions learn they run
+/// in a Chrome-compatible browser from the compatibility layer instead.
+pub fn application_name() -> &'static str {
+    static NAME: OnceLock<String> = OnceLock::new();
+    NAME.get_or_init(|| format!("Version/{} Safari/605.1.15", safari_version()))
+}
+
+fn safari_version() -> String {
+    std::fs::read_to_string("/Applications/Safari.app/Contents/version.plist")
+        .ok()
+        .and_then(|plist| {
+            let key = plist.find("<key>CFBundleShortVersionString</key>")?;
+            let rest = &plist[key..];
+            let start = rest.find("<string>")? + "<string>".len();
+            let end = rest[start..].find("</string>")?;
+            Some(rest[start..start + end].trim().to_owned())
+        })
+        .filter(|version| {
+            !version.is_empty() && version.chars().all(|c| c.is_ascii_digit() || c == '.')
+        })
+        .unwrap_or_else(|| "26.0".to_owned())
+}
+
+pub(crate) fn error(message: &str) -> Retained<NSError> {
+    let info = NSMutableDictionary::<NSString, objc2::runtime::AnyObject>::new();
+    unsafe {
+        info.setObject_forKey(
+            &NSString::from_str(message),
+            objc2::runtime::ProtocolObject::from_ref(NSLocalizedDescriptionKey),
+        );
+    }
+    unsafe {
+        NSError::errorWithDomain_code_userInfo(
+            &NSString::from_str("app.zephium.webext"),
+            1,
+            Some(&info),
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extension_constants_resolve_on_supported_hosts_and_missing_names_do_not() {
+        assert!(webkit_string(c"WKZephiumMadeUpConstant").is_none());
+        if !supported() {
+            return;
+        }
+        for name in [
+            c"WKWebExtensionContextErrorDomain",
+            c"WKWebExtensionDataTypeLocal",
+            c"WKWebExtensionDataTypeSession",
+            c"WKWebExtensionDataTypeSynchronized",
+            c"WKWebExtensionPermissionClipboardWrite",
+            c"WKWebExtensionPermissionCookies",
+        ] {
+            let value = webkit_string(name).unwrap_or_else(|| panic!("missing {name:?}"));
+            assert!(!value.is_empty(), "empty {name:?}");
+        }
+    }
+}
