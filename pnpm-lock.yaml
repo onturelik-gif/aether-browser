@@ -89,8 +89,8 @@ importers:
         specifier: 3.32.3
         version: 3.32.3
       '@xyflow/svelte':
-        specifier: 1.7.1
-        version: 1.7.1(svelte@5.57.3(@typescript-eslint/types@8.72.1))
+        specifier: 2.0.2
+        version: 2.0.2(svelte@5.57.3(@typescript-eslint/types@8.72.1))
       bits-ui:
         specifier: 2.18.1
         version: 2.18.1(@internationalized/date@3.12.2)(svelte@5.57.3(@typescript-eslint/types@8.72.1))
@@ -1572,13 +1572,15 @@ packages:
   '@vitest/utils@4.1.12':
     resolution: {integrity: sha512-Q3awXrwOfEV+qc3WmO5ONyE0yO7Q1gQ9/oyHxGLZ/pl7N3NO/ZztqQwKLuwMkV+CA1JYSIeO3gkHnRDIo4AVaA==}
 
-  '@xyflow/svelte@1.7.1':
-    resolution: {integrity: sha512-dKyAJ8Thwu/zqjOtRDoGN1j1LGtK94B7vWQ7OgIiyQ06OscRXuSBJeH2xbVS5Sv52rq1uHBMUmkGDZH5mTlVOA==}
+  '@xyflow/svelte@2.0.2':
+    resolution: {integrity: sha512-QJZ5ZzMBqJWO8bQOrp1G09r0qFxsL9ueBQLPbtXAupx3guMrjAPfK32EEAkqyBsp0OUptKn7FIMNq5ky8Nr6zQ==}
+    engines: {node: '>=20'}
     peerDependencies:
       svelte: ^5.25.0
 
-  '@xyflow/system@0.0.84':
-    resolution: {integrity: sha512-96zfGFjH3oZ3T0MRdH4gJ0SlXuCIxbBuHVevZ4xry5UTxqjzjt010+LRdholgepq7jhrcaz1JNtzrETscwnkEA==}
+  '@xyflow/system@1.0.0':
+    resolution: {integrity: sha512-mOeG0ZIkEUY5V5XQS+LE3QKlJqL7gu5ukqxAniuDDpfxtkA4uagOmBiWKh3w59wZ5nBC7ojBcNrBukM3hUJBKg==}
+    engines: {node: '>=20'}
 
   acorn-jsx@5.3.2:
     resolution: {integrity: sha512-rq9s+JNhf0IChjtDXxllJ7g41oZk5SlXtp0LHwyA5cejwn7vKmKp4pPri6YEePv2PU65sAsegbXtIinmDFDXgQ==}
@@ -4269,13 +4271,13 @@ snapshots:
       convert-source-map: 2.0.0
       tinyrainbow: 3.1.0
 
-  '@xyflow/svelte@1.7.1(svelte@5.57.3(@typescript-eslint/types@8.72.1))':
+  '@xyflow/svelte@2.0.2(svelte@5.57.3(@typescript-eslint/types@8.72.1))':
     dependencies:
       '@svelte-put/shortcut': 4.2.0(svelte@5.57.3(@typescript-eslint/types@8.72.1))
-      '@xyflow/system': 0.0.84
+      '@xyflow/system': 1.0.0
       svelte: 5.57.3(@typescript-eslint/types@8.72.1)
 
-  '@xyflow/system@0.0.84':
+  '@xyflow/system@1.0.0':
     dependencies:
       '@types/d3-drag': 3.0.7
       '@types/d3-interpolate': 3.0.4
