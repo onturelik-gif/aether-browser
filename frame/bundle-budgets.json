@@ -7,8 +7,8 @@
   },
   "browser-panel-mini": {
     "browser": {
-      "js": 561143,
-      "css": 174455
+      "js": 564307,
+      "css": 175220
     },
     "lazy:app/browser/WorkWorkspace.svelte": {
       "js": 43787,
@@ -79,8 +79,8 @@
       "css": 241
     },
     "lazy:features/newtab/components/NewTab.svelte": {
-      "js": 43299,
-      "css": 16510
+      "js": 48347,
+      "css": 20155
     },
     "lazy:features/notes/components/editor/NoteEditor.svelte": {
       "js": 452170,

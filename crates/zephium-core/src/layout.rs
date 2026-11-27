@@ -136,6 +136,20 @@ fn top_bar(win: Size, m: Metrics, content_present: bool) -> Layout {
             content: None,
         };
     }
+    if m.sidebar_hidden {
+        let strip_h = 8.0;
+        let chrome = Rect::new(0.0, 0.0, win.width, strip_h);
+        let content = Rect::new(
+            p,
+            strip_h,
+            (win.width - 2.0 * p).max(0.0),
+            (win.height - strip_h - p).max(0.0),
+        );
+        return Layout {
+            chrome,
+            content: Some(content),
+        };
+    }
     let top_h = p + TOP_BAR_HEIGHT;
     let chrome = Rect::new(0.0, 0.0, win.width, top_h);
     let content_y = top_h + m.gap;

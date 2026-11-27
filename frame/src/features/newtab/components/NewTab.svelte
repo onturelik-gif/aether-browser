@@ -36,6 +36,7 @@
   } from "$shared/sky";
   import { IS_WINDOWS } from "$shared/platform";
   import NewTabAccount from "./NewTabAccount.svelte";
+  import NewTabShortcuts from "./NewTabShortcuts.svelte";
 
   let {
     search,
@@ -490,6 +491,10 @@
         onclick={oncustomize}
       />
     </div>
+  {/if}
+
+  {#if !incognito}
+    <NewTabShortcuts />
   {/if}
 
   <!-- A private window has no figures; what it promises stands in their place. -->

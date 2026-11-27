@@ -800,6 +800,7 @@ impl Shell {
                     // presentation; use a neutral URL-derived label meanwhile.
                     self.items
                         .set_title(id, neutral_title_for_url(&committed_url));
+                    self.forget_tab_media(id);
                 }
                 self.reconcile_zoom(id);
                 self.maybe_discover_favicon(id);

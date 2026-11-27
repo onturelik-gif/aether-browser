@@ -4220,6 +4220,7 @@ fn execute_command_or(
     if id.starts_with("bgToast.y=")
         || id.starts_with("dragGhost.")
         || id.starts_with("bookmark.")
+        || id.starts_with("topbar.")
     {
         return shell();
     }

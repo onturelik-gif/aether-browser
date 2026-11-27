@@ -1077,6 +1077,18 @@ impl Shell {
             }
             return operation_result(OperationOutcome::Applied, OperationReason::MutationApplied);
         }
+        if id == "topbar.collapse" || id == "topbar.expand" {
+            let hide = id == "topbar.collapse";
+            if let Some(win) = self.windows.focused_mut() {
+                if win.mode == zephium_core::layout::Mode::TopBar
+                    && win.metrics.sidebar_hidden != hide
+                {
+                    win.metrics.sidebar_hidden = hide;
+                    let _ = self.relayout_with(true);
+                }
+            }
+            return operation_result(OperationOutcome::Applied, OperationReason::MutationApplied);
+        }
         if let Some(url) = id
             .strip_prefix("bookmark.newTab=")
             .or_else(|| id.strip_prefix("bookmark.openTab="))

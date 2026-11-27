@@ -4,6 +4,8 @@
     ArrowRight01Icon,
     Cancel01Icon,
     Globe02Icon,
+    PinIcon,
+    PinOffIcon,
     PlusSignIcon,
     PuzzleIcon,
     RefreshIcon,
@@ -16,7 +18,6 @@
   import { tabs } from "$domain/tabs";
   import { favicons } from "$domain/favicons";
   import { preferences } from "$domain/preferences";
-  import { surface as browserPage } from "$domain/surface";
   import { commands } from "$shared/ipc/bindings";
   import { AddressField, SiteDetails, SiteHead } from "$features/address";
   import { BlockerShield } from "$features/blocker";
@@ -30,6 +31,7 @@
   } from "$features/tabs/lib/sidebar-model";
   import { RowDrag } from "$session/row-drag.svelte";
   import * as tabDrag from "$session/tab-drag.svelte";
+  import Disclosure from "$shared/ui/Disclosure";
   import DragMark from "$shared/ui/DragMark";
   import FavIcon from "$shared/ui/FavIcon";
   import Icon from "$shared/ui/Icon";
@@ -57,7 +59,39 @@
   let activeId = $derived(tabs.activeId());
   let activeTab = $derived(tabs.activeTab());
   let headerEl = $state<HTMLElement>();
+  let tabStripEl = $state<HTMLElement>();
   let bookmarksEl = $state<HTMLElement>();
+  let tabDropBefore = $state<string | null>(null);
+  let tabDropAtEnd = $state(false);
+  let groupDragKey = $state<string | null>(null);
+
+  function computeTabDrop(clientX: number, excludeIds: Set<string>): { before: string | null; atEnd: boolean } {
+    if (!tabStripEl) return { before: null, atEnd: false };
+    const els = Array.from(tabStripEl.querySelectorAll<HTMLElement>("[data-topbar-tab]"));
+    for (const el of els) {
+      const id = el.dataset.topbarTab;
+      if (!id || excludeIds.has(id)) continue;
+      const r = el.getBoundingClientRect();
+      if (clientX < r.left + r.width / 2) {
+        return { before: id, atEnd: false };
+      }
+    }
+    return { before: null, atEnd: true };
+  }
+
+  function groupTabIds(groupKey: string): string[] {
+    const out: string[] = [];
+    let inside = false;
+    for (const unit of displayUnits) {
+      if (unit.kind === "folder") {
+        if (unit.key === groupKey) inside = true;
+        else if (inside) break;
+      } else if (inside) {
+        for (const t of unitTabs(unit)) out.push(t.id);
+      }
+    }
+    return out;
+  }
 
   // Horizontal drag-to-reorder for bookmarks in the TopBar bookmarks row.
   let bmDrag = $state<{
@@ -145,6 +179,8 @@
     list: () => undefined,
     reorder: () => null,
     drop: ({ id, x, y, over, before }) => {
+      tabDropBefore = null;
+      tabDropAtEnd = false;
       if (over?.closest("[data-essentials-drop]")) {
         if (tabDrag.keepable(id)) {
           void tabDrag.move(id, true, before);
@@ -154,8 +190,29 @@
       const barBottom = headerEl?.getBoundingClientRect().bottom ?? 108;
       if (y > barBottom) {
         tabs.dropTab(id, x, y);
+        return;
       }
+      const target = computeTabDrop(x, new Set([id]));
+      void tabDrag.move(id, false, target.before);
     },
+  });
+
+  $effect(() => {
+    const g = drag.ghost;
+    if (!g) {
+      tabDropBefore = null;
+      tabDropAtEnd = false;
+      return;
+    }
+    const stripRect = tabStripEl?.getBoundingClientRect();
+    if (stripRect && g.y >= stripRect.top - 12 && g.y <= stripRect.bottom + 12) {
+      const target = computeTabDrop(g.x, new Set([g.id]));
+      tabDropBefore = target.before;
+      tabDropAtEnd = target.atEnd;
+    } else {
+      tabDropBefore = null;
+      tabDropAtEnd = false;
+    }
   });
 
   $effect(() => () => drag.abandon());
@@ -176,12 +233,82 @@
     else folded.add(key);
   }
 
-  function switchToSidebar() {
-    void preferences.set("sidebar.mode", "default");
+  const PIN_STORAGE_KEY = "aether.topbar.pinned";
+  let topPinned = $state<boolean>(
+    typeof localStorage === "undefined"
+      ? true
+      : localStorage.getItem(PIN_STORAGE_KEY) !== "false",
+  );
+  let topCollapsed = $state(false);
+  let extOpen = $state(false);
+  let utilityOpen = $state(false);
+  let hideTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function cancelHide() {
+    if (hideTimer) {
+      clearTimeout(hideTimer);
+      hideTimer = null;
+    }
   }
 
-  function openExtensions() {
-    void browserPage.open("extensions");
+  function revealTopBar() {
+    cancelHide();
+    if (topCollapsed) {
+      topCollapsed = false;
+      void commands.runCommand("topbar.expand").catch(() => {});
+    }
+  }
+
+  function scheduleHideTopBar() {
+    if (topPinned) return;
+    if (extOpen || utilityOpen || drag.ghost !== null || bmDrag?.active) return;
+    if (
+      document.activeElement instanceof HTMLInputElement &&
+      headerEl?.contains(document.activeElement)
+    ) {
+      return;
+    }
+    // Never auto-hide on an empty New Tab page (there's no webpage beneath).
+    if (!activeTab?.url) return;
+    cancelHide();
+    hideTimer = setTimeout(() => {
+      hideTimer = null;
+      if (topPinned || extOpen || utilityOpen || drag.ghost !== null || bmDrag?.active) return;
+      topCollapsed = true;
+      void commands.runCommand("topbar.collapse").catch(() => {});
+    }, 240);
+  }
+
+  function toggleTopPin() {
+    topPinned = !topPinned;
+    try {
+      localStorage.setItem(PIN_STORAGE_KEY, topPinned ? "true" : "false");
+    } catch {}
+    if (topPinned) {
+      revealTopBar();
+    } else {
+      scheduleHideTopBar();
+    }
+  }
+
+  $effect(() => {
+    if (!activeTab?.url && topCollapsed) {
+      revealTopBar();
+    }
+  });
+
+  $effect(() => () => {
+    cancelHide();
+    if (topCollapsed) {
+      void commands.runCommand("topbar.expand").catch(() => {});
+    }
+  });
+
+  function switchToSidebar() {
+    cancelHide();
+    topCollapsed = false;
+    void commands.runCommand("topbar.expand").catch(() => {});
+    void preferences.set("sidebar.mode", "default");
   }
 
   function selectTab(id: string) {
@@ -248,10 +375,28 @@
   }
 </script>
 
-<header bind:this={headerEl} class="aether-topbar" data-windows={IS_WINDOWS || undefined}>
+<header
+  bind:this={headerEl}
+  class="aether-topbar"
+  data-windows={IS_WINDOWS || undefined}
+  data-collapsed={topCollapsed || undefined}
+  onpointerenter={revealTopBar}
+  onpointerleave={scheduleHideTopBar}
+>
+  {#if topCollapsed}
+    <div class="topbar-hover-strip" aria-label="Üst çubuğu göster">
+      <span class="topbar-hover-pill"></span>
+    </div>
+  {:else}
   <!-- Row 1: Classic Chrome/Edge horizontal tab strip with horizontal tab groups & drag-to-split -->
   <div class="topbar-tabs-row" data-tauri-drag-region>
-    <div class="topbar-tab-strip" role="tablist" aria-label="Sekmeler">
+    <div
+      bind:this={tabStripEl}
+      class="topbar-tab-strip"
+      role="tablist"
+      aria-label="Sekmeler"
+      data-drop-end={tabDropAtEnd || undefined}
+    >
       {#each displayUnits as unit (unit.key)}
         {#if unit.kind === "folder"}
           {@const collapsed = folded.has(unit.key)}
@@ -259,9 +404,30 @@
           <button
             type="button"
             class={`topbar-group-chip aether-tint-${colorIdx}`}
+            draggable="true"
             data-collapsed={collapsed || undefined}
-            title={collapsed ? "Grubu aç" : "Grubu daralt"}
+            title={collapsed ? "Grubu aç · Sürükleyerek taşı" : "Grubu daralt · Sürükleyerek taşı"}
             onclick={() => toggleGroup(unit.key)}
+            ondragstart={() => {
+              groupDragKey = unit.key;
+            }}
+            ondragover={(e) => {
+              if (!groupDragKey) return;
+              e.preventDefault();
+            }}
+            ondrop={(e) => {
+              e.preventDefault();
+              if (!groupDragKey) return;
+              const ids = groupTabIds(groupDragKey);
+              const target = computeTabDrop(e.clientX, new Set(ids));
+              for (const tid of ids) {
+                void tabDrag.move(tid, false, target.before);
+              }
+              groupDragKey = null;
+            }}
+            ondragend={() => {
+              groupDragKey = null;
+            }}
           >
             {#if unit.groupMeta?.icon}
               <FavIcon
@@ -290,7 +456,24 @@
               role="tab"
               tabindex={active ? 0 : -1}
               aria-selected={active}
+              data-topbar-tab={tab.id}
+              data-drop-before={tabDropBefore === tab.id || undefined}
               data-active={active || undefined}
+              ondragover={(e) => {
+                if (!groupDragKey) return;
+                e.preventDefault();
+              }}
+              ondrop={(e) => {
+                e.preventDefault();
+                if (!groupDragKey) return;
+                const ids = groupTabIds(groupDragKey);
+                if (!ids.includes(tab.id)) {
+                  for (const tid of ids) {
+                    void tabDrag.move(tid, false, tab.id);
+                  }
+                }
+                groupDragKey = null;
+              }}
               data-zephium-tab-id={tab.id}
               data-zephium-tab-url={tab.url ?? ""}
               data-zephium-projection-revision={tab.projection_revision}
@@ -416,6 +599,13 @@
                 ? m.site_info_label_status({ status: page.warning })
                 : m.site_info_label()}
             warning={page?.warning}
+            onopen={() => {
+              utilityOpen = true;
+              cancelHide();
+            }}
+            onclose={() => {
+              utilityOpen = false;
+            }}
           >
             {#snippet children(open)}
               {#snippet siteHead(name: string | null, control?: Snippet)}
@@ -431,14 +621,36 @@
     </div>
 
     <div class="topbar-nav-group">
+      <Disclosure
+        label="Eklentiler"
+        triggerTitle="Eklentiler"
+        triggerClass="topbar-icon-btn"
+        panelClass="utilities-panel sidebar-softens"
+        align="end"
+        onopen={() => {
+          extOpen = true;
+          cancelHide();
+        }}
+        onclose={() => {
+          extOpen = false;
+        }}
+      >
+        {#snippet trigger()}
+          <Icon icon={PuzzleIcon} size={15} />
+        {/snippet}
+        <div class="topbar-ext-popup">
+          <ExtensionsSection />
+        </div>
+      </Disclosure>
       <button
         type="button"
         class="topbar-icon-btn"
-        title="Eklentiler"
-        aria-label="Eklentiler"
-        onclick={openExtensions}
+        data-pinned={topPinned || undefined}
+        title={topPinned ? "Üst çubuğu otomatik gizle" : "Üst çubuğu sabitle"}
+        aria-label={topPinned ? "Üst çubuğu otomatik gizle" : "Üst çubuğu sabitle"}
+        onclick={toggleTopPin}
       >
-        <Icon icon={PuzzleIcon} size={15} />
+        <Icon icon={topPinned ? PinIcon : PinOffIcon} size={15} />
       </button>
       <button
         type="button"
@@ -514,6 +726,7 @@
       {/each}
     {/if}
   </div>
+  {/if}
 </header>
 
 {#if drag.ghost !== null}
@@ -547,6 +760,43 @@
     user-select: none;
   }
 
+  .aether-topbar[data-collapsed] {
+    height: 8px;
+    padding: 0;
+    gap: 0;
+  }
+
+  .topbar-hover-strip {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    height: 8px;
+    cursor: default;
+  }
+
+  .topbar-hover-pill {
+    width: 48px;
+    height: 3px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.22);
+    transition: background-color 140ms ease, width 140ms ease;
+  }
+
+  .topbar-hover-strip:hover .topbar-hover-pill {
+    width: 72px;
+    background: rgba(56, 189, 248, 0.7);
+  }
+
+  .topbar-ext-popup {
+    min-width: 240px;
+    padding: 4px 0;
+  }
+
+  :global(.topbar-icon-btn[data-pinned]) {
+    color: #38bdf8;
+  }
+
   .topbar-tabs-row {
     display: flex;
     align-items: center;
@@ -571,6 +821,19 @@
 
   .topbar-tab-strip::-webkit-scrollbar {
     display: none;
+  }
+
+  .topbar-tab[data-drop-before] {
+    box-shadow: inset 2px 0 0 #38bdf8;
+  }
+
+  .topbar-tab-strip[data-drop-end]::after {
+    content: "";
+    flex: none;
+    width: 2px;
+    height: 18px;
+    border-radius: 2px;
+    background: #38bdf8;
   }
 
   .topbar-group-chip {
