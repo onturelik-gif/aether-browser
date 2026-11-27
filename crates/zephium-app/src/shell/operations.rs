@@ -1081,9 +1081,23 @@ impl Shell {
             let hide = id == "topbar.collapse";
             if let Some(win) = self.windows.focused_mut() {
                 if win.mode == zephium_core::layout::Mode::TopBar
-                    && win.metrics.sidebar_hidden != hide
+                    && (win.metrics.sidebar_hidden != hide || win.metrics.caption != 0.0)
                 {
                     win.metrics.sidebar_hidden = hide;
+                    win.metrics.caption = 0.0;
+                    let _ = self.relayout_with(true);
+                }
+            }
+            return operation_result(OperationOutcome::Applied, OperationReason::MutationApplied);
+        }
+        if id == "topbar.popover=on" || id == "topbar.popover=off" {
+            let extra = if id == "topbar.popover=on" { 260.0 } else { 0.0 };
+            if let Some(win) = self.windows.focused_mut() {
+                if win.mode == zephium_core::layout::Mode::TopBar
+                    && (win.metrics.caption - extra).abs() > 0.5
+                {
+                    win.metrics.sidebar_hidden = false;
+                    win.metrics.caption = extra;
                     let _ = self.relayout_with(true);
                 }
             }

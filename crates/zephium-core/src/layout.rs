@@ -137,7 +137,7 @@ fn top_bar(win: Size, m: Metrics, content_present: bool) -> Layout {
         };
     }
     if m.sidebar_hidden {
-        let strip_h = 8.0;
+        let strip_h = 12.0;
         let chrome = Rect::new(0.0, 0.0, win.width, strip_h);
         let content = Rect::new(
             p,
@@ -150,7 +150,8 @@ fn top_bar(win: Size, m: Metrics, content_present: bool) -> Layout {
             content: Some(content),
         };
     }
-    let top_h = p + TOP_BAR_HEIGHT;
+    let popover_h = m.caption.max(0.0);
+    let top_h = p + TOP_BAR_HEIGHT + popover_h;
     let chrome = Rect::new(0.0, 0.0, win.width, top_h);
     let content_y = top_h + m.gap;
     let content = Rect::new(

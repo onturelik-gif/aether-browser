@@ -1601,12 +1601,12 @@ fn sync(state: &Rc<RefCell<State>>) {
             state.revision,
             state.fullscreen,
             preview,
-            if state.fullscreen.is_some() || state.origin.1 > 40.0 {
+            if state.fullscreen.is_some() || state.origin.1 > 10.0 {
                 0.0
             } else {
                 state.caption_offset
             },
-            state.caption_moving && state.fullscreen.is_none() && state.origin.1 <= 40.0,
+            state.caption_moving && state.fullscreen.is_none() && state.origin.1 <= 10.0,
             cut,
         )
     };

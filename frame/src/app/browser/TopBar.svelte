@@ -303,8 +303,14 @@
     }
   });
 
+  $effect(() => {
+    const anyPopover = extOpen || utilityOpen;
+    void commands.runCommand(anyPopover ? "topbar.popover=on" : "topbar.popover=off").catch(() => {});
+  });
+
   $effect(() => () => {
     cancelHide();
+    void commands.runCommand("topbar.popover=off").catch(() => {});
     if (topCollapsed) {
       void commands.runCommand("topbar.expand").catch(() => {});
     }
@@ -390,7 +396,13 @@
   onpointerleave={scheduleHideTopBar}
 >
   {#if topCollapsed}
-    <div class="topbar-hover-strip" aria-label="Üst çubuğu göster">
+    <div
+      class="topbar-hover-strip"
+      role="presentation"
+      aria-label="Üst çubuğu göster"
+      onpointerenter={revealTopBar}
+      onpointermove={revealTopBar}
+    >
       <span class="topbar-hover-pill"></span>
     </div>
   {:else}
@@ -779,7 +791,7 @@
   }
 
   .aether-topbar[data-collapsed] {
-    height: 8px;
+    height: 12px;
     padding: 0;
     gap: 0;
   }
@@ -789,7 +801,7 @@
     align-items: center;
     justify-content: center;
     width: 100%;
-    height: 8px;
+    height: 12px;
     cursor: default;
   }
 
