@@ -31,6 +31,9 @@ const SPACE_MENU: &str = "mini.space=";
 /// How far each further open mini window steps from the last, so a new one
 /// never lands exactly on another.
 const CASCADE: f64 = 28.0;
+/// Logical width of the transparent left gutter on Windows where the 3 Zen
+/// Glance circular buttons (`×`, `⤢`, `◫`) float outside the webpage bubble.
+const GLANCE_GUTTER_LEFT: f64 = 52.0;
 
 /// Each open window's latest view, which its space menu is built from, and
 /// whether it was last put above other windows.
@@ -133,11 +136,20 @@ fn carry_out(app: &tauri::AppHandle, window: u64, route: Routed) -> OperationAdm
     }
 }
 
-/// Sends `action` through the operation ledger, so its settlement reaches
-/// the caller like any other shell operation.
+/// Sends `action` through the operation ledger, falling back directly to the
+/// shell command queue if the ledger is saturated so Glance controls (`×`, `⤢`,
+/// `◫`) are guaranteed to execute.
 fn act(app: &tauri::AppHandle, window: u64, action: MiniAction) -> OperationAdmission {
     match app.try_state::<Handle>() {
-        Some(shell) => crate::dispatch_operation(app, &shell, Command::Mini { window, action }),
+        Some(shell) => {
+            let admission =
+                crate::dispatch_operation(app, &shell, Command::Mini { window, action });
+            if admission.accepted {
+                admission
+            } else {
+                crate::ui_admission(shell.dispatch(Command::Mini { window, action }))
+            }
+        }
         None => crate::ui_admission(false),
     }
 }
@@ -378,7 +390,10 @@ fn build(app: &tauri::AppHandle, opened: MiniOpenedView) -> bool {
     #[cfg(target_os = "windows")]
     let builder = builder
         .decorations(false)
-        .shadow(true)
+        .transparent(true)
+        .shadow(false)
+        .resizable(false)
+        .background_color(tauri::utils::config::Color(0, 0, 0, 0))
         .data_directory(factory.runtime.clone())
         .additional_browser_args(crate::PRIVILEGED_WEBVIEW2_BROWSER_ARGS);
     let window = match builder.build() {
@@ -400,7 +415,23 @@ fn build(app: &tauri::AppHandle, opened: MiniOpenedView) -> bool {
     }
     #[cfg(target_os = "windows")]
     {
-        crate::platform::imp::round_corners(&window);
+        // Ensure the Glance chrome WebView2 uses a fully transparent default
+        // background so the 52px left gutter around the 3 floating buttons
+        // reveals the underlying browser page cleanly.
+        let _ = window.with_webview(|webview| unsafe {
+            use webview2_com::Microsoft::Web::WebView2::Win32::{
+                ICoreWebView2Controller2, COREWEBVIEW2_COLOR,
+            };
+            use windows::core::Interface;
+            if let Ok(c2) = webview.controller().cast::<ICoreWebView2Controller2>() {
+                let _ = c2.SetDefaultBackgroundColor(COREWEBVIEW2_COLOR {
+                    A: 0,
+                    R: 0,
+                    G: 0,
+                    B: 0,
+                });
+            }
+        });
         if let Err(error) = crate::platform::imp::harden_privileged(
             &window,
             &factory.runtime,
@@ -505,7 +536,14 @@ fn place(app: &tauri::AppHandle, window: &WebviewWindow, id: u64) {
         let main_pos = main.outer_position().ok()?;
         let main_size = main.outer_size().ok()?;
         let win_size = window.outer_size().ok()?;
-        let x = main_pos.x + (main_size.width as i32 - win_size.width as i32) / 2;
+        let gutter = if cfg!(target_os = "windows") {
+            let scale = window.scale_factor().unwrap_or(1.0);
+            (GLANCE_GUTTER_LEFT * scale).round() as i32
+        } else {
+            0
+        };
+        let bubble_w = (win_size.width as i32 - gutter).max(1);
+        let x = main_pos.x + (main_size.width as i32 - bubble_w) / 2 - gutter;
         let y = main_pos.y + (main_size.height as i32 - win_size.height as i32) / 2;
         Some(tauri::PhysicalPosition::new(x, y))
     });

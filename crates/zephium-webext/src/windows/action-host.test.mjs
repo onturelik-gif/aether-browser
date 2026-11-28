@@ -184,3 +184,48 @@ test('missing and broken package icons stay quiet across tab switches after boun
     assert.equal(state.snapshots, defaultIcon ? 2 : 1);
   }
 });
+
+test('completed chrome.downloads items are reported once for the owning extension', async () => {
+  const messages = [], window = {};
+  let onChangedListener = null;
+  let searchItems = [];
+  const chrome = {
+    runtime: {
+      id: 'lmfdoicilocnkcokpdgcnijcfdnmcmkc',
+      getURL: path => `chrome-extension://lmfdoicilocnkcokpdgcnijcfdnmcmkc${path}`,
+      getManifest: () => ({name: 'Shot'}),
+      sendMessage: async () => null,
+      onMessage: {addListener: () => {}},
+    },
+    tabs: {query: async () => []},
+    action: {getTitle: async () => '', getBadgeText: async () => '', getPopup: async () => '', isEnabled: async () => true},
+    downloads: {
+      onCreated: {addListener: () => {}},
+      onChanged: {addListener: fn => { onChangedListener = fn; }},
+      search: (_q, cb) => cb(searchItems),
+    },
+    webview: {postMessage: message => messages.push(JSON.parse(message))},
+  };
+  vm.runInNewContext(source, {chrome, window, document: {}, URL});
+  searchItems = [{
+    id: 7,
+    state: 'complete',
+    filename: 'C:\\Users\\test\\Downloads\\Anasayfa_X_00-00.png',
+    url: 'data:image/png;base64,AAAA',
+    byExtensionId: 'lmfdoicilocnkcokpdgcnijcfdnmcmkc',
+  }];
+  onChangedListener({id: 7, state: {current: 'complete'}});
+  onChangedListener({id: 7, state: {current: 'complete'}}); // deduplicated
+  searchItems = [{
+    id: 8,
+    state: 'complete',
+    filename: 'C:\\Users\\test\\Downloads\\other.png',
+    url: 'https://example.com/other.png',
+    byExtensionId: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+  }];
+  onChangedListener({id: 8, state: {current: 'complete'}}); // ignored (other extension)
+  const completed = messages.filter(m => m.kind === 'download-completed');
+  assert.equal(completed.length, 1);
+  assert.equal(completed[0].path, 'C:\\Users\\test\\Downloads\\Anasayfa_X_00-00.png');
+  assert.equal(completed[0].url, '');
+});

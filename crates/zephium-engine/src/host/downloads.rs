@@ -207,6 +207,13 @@ enum Message {
     Cleaned,
     #[cfg(target_os = "windows")]
     RuntimeExited(bool),
+    #[cfg(target_os = "windows")]
+    ExtensionCompleted {
+        partition: Partition,
+        source: String,
+        source_is_context: bool,
+        result: Result<(PathBuf, FileIdentity), DownloadError>,
+    },
     RecoveryProfiles(DownloadStoreReply),
     RecoveryPage(ProfileId, DownloadStoreReply),
     Recovered(
@@ -913,6 +920,91 @@ impl Downloads {
             Message::Cleaned => {}
             #[cfg(target_os = "windows")]
             Message::RuntimeExited(clean) => self.runtime_exit_result(clean),
+            #[cfg(target_os = "windows")]
+            Message::ExtensionCompleted {
+                partition,
+                source,
+                source_is_context,
+                result,
+            } => {
+                if self.stopping.get() || self.retired.borrow().contains(&partition.profile()) {
+                    return;
+                }
+                let Ok((path, file_identity)) = result else {
+                    return;
+                };
+                let profile = partition.profile();
+                let duplicate = self.active.borrow().values().any(|transfer| {
+                    transfer.partition.profile() == profile
+                        && (transfer.record.destination.as_ref() == Some(&path)
+                            || transfer.record.identity.as_ref().is_some_and(|existing| {
+                                existing.volume == file_identity.volume
+                                    && existing.file == file_identity.file
+                                    && existing.file_high == file_identity.file_high
+                            }))
+                }) || self.recent.borrow().iter().any(|(owner, record)| {
+                    owner.profile() == profile
+                        && (record.destination.as_ref() == Some(&path)
+                            || record.identity.as_ref().is_some_and(|existing| {
+                                existing.volume == file_identity.volume
+                                    && existing.file == file_identity.file
+                                    && existing.file_high == file_identity.file_high
+                            }))
+                });
+                if duplicate {
+                    return;
+                }
+                let filename = path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .map(safe_filename)
+                    .unwrap_or_else(|| "download".into());
+                let record = DownloadRecord {
+                    id: DownloadId::generate(),
+                    session: self.session,
+                    revision: 1,
+                    created_at: SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .map_or(0, |time| time.as_secs() as i64),
+                    filename,
+                    source,
+                    source_is_context,
+                    state: DownloadState::Completed,
+                    received: file_identity.bytes,
+                    total: Some(file_identity.bytes),
+                    error: None,
+                    destination: Some(path),
+                    staging: None,
+                    staging_identity: None,
+                    identity: Some(file_identity),
+                    writer: None,
+                    writer_released: true,
+                    insecure: false,
+                };
+                if !record.validate() {
+                    return;
+                }
+                {
+                    let mut recent = self.recent.borrow_mut();
+                    recent.push_front((partition, record.clone()));
+                    recent.truncate(RECENT_LIMIT);
+                }
+                self.changed(profile);
+                if !matches!(partition, Partition::Ephemeral(_)) {
+                    self.work.set(self.work.get() + 1);
+                    let sender = self.sender.clone();
+                    if !self.store.download_call(
+                        profile,
+                        DownloadStoreCall::Save(Box::new(record)),
+                        Box::new(move |_| {
+                            let _ = sender.send(Message::Cleaned);
+                        }),
+                    ) {
+                        let _ = self.sender.send(Message::Cleaned);
+                    }
+                    self.ensure_timer();
+                }
+            }
             Message::Preferences(id, DownloadStoreReply::Preferences(preferences)) => {
                 self.decide(id, preferences)
             }

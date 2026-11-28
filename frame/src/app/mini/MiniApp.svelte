@@ -32,7 +32,9 @@
     });
   }
   function act(intent: MiniIntent) {
-    void commands.miniAction(intent).catch(() => {});
+    void commands.miniAction(intent).catch((error) => {
+      console.error("miniAction failed:", intent, error);
+    });
   }
   function spaceMenu(x: number, y: number) {
     void commands.miniSpaceMenu(x, y).catch(() => {});
@@ -141,17 +143,17 @@
 </div>
 
 <style>
-  .mini-root {
-    display: flex;
-    flex-direction: column;
-    align-items: stretch;
-    box-sizing: border-box;
-    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.12);
-    background: #14151c;
+  :global(html),
+  :global(body),
+  :global(#root) {
+    background: transparent !important;
   }
 
-  :global(html[data-theme="light"]) .mini-root {
-    box-shadow: inset 0 0 0 1px rgba(15, 23, 42, 0.14);
-    background: #f1f5f9;
+  .mini-root {
+    position: relative;
+    width: 100%;
+    height: 100%;
+    background: transparent !important;
+    overflow: hidden;
   }
 </style>

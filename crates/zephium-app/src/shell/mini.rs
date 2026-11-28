@@ -8,8 +8,11 @@ use super::*;
 
 /// Mini windows open at once; a page beyond this opens as a tab instead.
 pub const MAX_MINI_WINDOWS: usize = 8;
-/// The toolbar the mini window's chrome draws above its page.
+/// The toolbar the mini window's chrome draws above its page (macOS / non-Windows).
 pub const MINI_TOOLBAR_HEIGHT: f64 = 40.0;
+/// Transparent left gutter on Windows where Zen-style Glance circular controls
+/// (`×`, `⤢`, `◫`) float outside the rounded webpage bubble.
+pub const MINI_GLANCE_GUTTER_LEFT: f64 = 52.0;
 /// The size of the first mini window; later ones open at the size the
 /// person last gave one, for as long as the browser runs.
 pub const MINI_WINDOW_SIZE: Size = Size {
@@ -17,23 +20,31 @@ pub const MINI_WINDOW_SIZE: Size = Size {
     height: 640.0,
 };
 /// How far the page stays inside the window's left, right and bottom edges.
-/// A Windows mini window draws no frame, and the ring it resizes by lies
-/// along those edges inside the window; a page there would cover it.
-pub const MINI_PAGE_INSET: f64 = if cfg!(target_os = "windows") {
-    4.0
-} else {
-    0.0
-};
+pub const MINI_PAGE_INSET: f64 = 0.0;
 
-/// Where a mini window's page sits in a window of `size`: under the toolbar,
-/// clear of the edges it is resized by.
+/// Where a mini window's page sits in a window of `size`:
+/// - On Windows: pure full-height rounded bubble starting right after the
+///   52px transparent left button gutter (zero top titlebar).
+/// - On macOS/Linux: under the toolbar.
 pub(crate) fn mini_page_region(size: Size) -> Rect {
-    Rect::new(
-        MINI_PAGE_INSET,
-        MINI_TOOLBAR_HEIGHT,
-        (size.width - 2.0 * MINI_PAGE_INSET).max(0.0),
-        (size.height - MINI_TOOLBAR_HEIGHT - MINI_PAGE_INSET).max(0.0),
-    )
+    #[cfg(target_os = "windows")]
+    {
+        Rect::new(
+            MINI_GLANCE_GUTTER_LEFT,
+            0.0,
+            (size.width - MINI_GLANCE_GUTTER_LEFT).max(0.0),
+            size.height.max(0.0),
+        )
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Rect::new(
+            MINI_PAGE_INSET,
+            MINI_TOOLBAR_HEIGHT,
+            (size.width - 2.0 * MINI_PAGE_INSET).max(0.0),
+            (size.height - MINI_TOOLBAR_HEIGHT - MINI_PAGE_INSET).max(0.0),
+        )
+    }
 }
 
 /// The smallest content a mini window keeps; the native window enforces it.
@@ -228,19 +239,25 @@ impl Shell {
         Some((profile, mini.space))
     }
 
-    /// Opens a Glance floating popup window centered over the main window.
+    /// Opens a Glance floating popup bubble centered over the main window,
+    /// leaving the background webpage visible on all four sides.
     pub(super) fn open_glance_mini(
         &mut self,
         profile: ProfileId,
         space: SpaceId,
         url: String,
     ) -> Option<WindowId> {
+        let gutter = if cfg!(target_os = "windows") {
+            MINI_GLANCE_GUTTER_LEFT
+        } else {
+            0.0
+        };
         let size = self.windows.focused().map_or(
-            Size::new(980.0, 720.0),
+            Size::new(920.0 + gutter, 680.0),
             |main| {
                 Size::new(
-                    (main.size.width * 0.80).clamp(640.0, 1280.0),
-                    (main.size.height * 0.82).clamp(460.0, 860.0),
+                    (main.size.width * 0.78).clamp(620.0, 1180.0) + gutter,
+                    (main.size.height * 0.80).clamp(440.0, 820.0),
                 )
             },
         );
@@ -707,15 +724,32 @@ impl Shell {
         {
             return operation_result(OperationOutcome::Rejected, OperationReason::InvalidScope);
         }
-        let before = self.today_tabs(space).into_iter().next();
-        if !self.items.move_tab_to_root(
-            id,
-            Placement::Space {
-                space,
-                section: SpaceSection::Today,
-            },
-            before,
-        ) {
+        let glance_parent = self
+            .glance
+            .filter(|(w, _)| *w == window)
+            .map(|(_, parent)| parent);
+        let anchor = glance_parent
+            .filter(|parent| self.item_in_scope(*parent, profile, space))
+            .or_else(|| {
+                self.windows
+                    .focused()
+                    .and_then(|main| main.active)
+                    .filter(|active| self.item_in_scope(*active, profile, space))
+            });
+        let today = Placement::Space {
+            space,
+            section: SpaceSection::Today,
+        };
+        let before = anchor
+            .and_then(|parent| {
+                let roots = self.items.roots(today);
+                roots
+                    .iter()
+                    .position(|r| *r == parent)
+                    .map(|at| roots.get(at + 1).copied())
+            })
+            .unwrap_or_else(|| self.today_tabs(space).into_iter().next());
+        if !self.items.move_tab_to_root(id, today, before) {
             return operation_result(OperationOutcome::Rejected, OperationReason::InvalidScope);
         }
         if self.glance.is_some_and(|(w, _)| w == window) {
@@ -901,11 +935,23 @@ mod tests {
     #[test]
     fn the_page_sits_under_the_toolbar_clear_of_the_resize_edges() {
         let region = mini_page_region(Size::new(760.0, 640.0));
-        assert_eq!(region.x, MINI_PAGE_INSET);
-        assert_eq!(region.y, MINI_TOOLBAR_HEIGHT);
-        assert_eq!(region.width, 760.0 - 2.0 * MINI_PAGE_INSET);
-        assert_eq!(region.height, 640.0 - MINI_TOOLBAR_HEIGHT - MINI_PAGE_INSET);
-        let tiny = mini_page_region(Size::new(0.0, 10.0));
-        assert_eq!((tiny.width, tiny.height), (0.0, 0.0));
+        #[cfg(target_os = "windows")]
+        {
+            assert_eq!(region.x, MINI_GLANCE_GUTTER_LEFT);
+            assert_eq!(region.y, 0.0);
+            assert_eq!(region.width, 760.0 - MINI_GLANCE_GUTTER_LEFT);
+            assert_eq!(region.height, 640.0);
+            let tiny = mini_page_region(Size::new(10.0, 0.0));
+            assert_eq!((tiny.width, tiny.height), (0.0, 0.0));
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            assert_eq!(region.x, MINI_PAGE_INSET);
+            assert_eq!(region.y, MINI_TOOLBAR_HEIGHT);
+            assert_eq!(region.width, 760.0 - 2.0 * MINI_PAGE_INSET);
+            assert_eq!(region.height, 640.0 - MINI_TOOLBAR_HEIGHT - MINI_PAGE_INSET);
+            let tiny = mini_page_region(Size::new(0.0, 10.0));
+            assert_eq!((tiny.width, tiny.height), (0.0, 0.0));
+        }
     }
 }

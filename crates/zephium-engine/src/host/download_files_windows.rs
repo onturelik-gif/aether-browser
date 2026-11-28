@@ -497,7 +497,7 @@ impl Drop for Apartment {
     }
 }
 fn protect(path: &Path, source: &str, destination: &Path) -> Result<(), DownloadError> {
-    if zephium_core::permissions::PageOrigin::parse_exact(source).is_err() {
+    if !zephium_core::downloads::valid_download_source(source) {
         return Err(DownloadError::Invalid);
     }
     // This runs on a dedicated file worker, not the UI's COM apartment.
@@ -509,7 +509,15 @@ fn protect(path: &Path, source: &str, destination: &Path) -> Result<(), Download
         unsafe { CoCreateInstance(&AttachmentServices, None, CLSCTX_INPROC_SERVER) }
             .map_err(|_| DownloadError::Protection)?;
     let file = wide(path)?;
-    let origin = wide(Path::new(source))?;
+    // AttachmentServices::SetSource expects a standard URL scheme; use
+    // about:internet for chrome-extension:// downloads while preserving the
+    // real extension origin in HostUrl below.
+    let attachment_source = if zephium_core::permissions::PageOrigin::parse_exact(source).is_ok() {
+        source
+    } else {
+        "about:internet"
+    };
+    let origin = wide(Path::new(attachment_source))?;
     let filename = wide(Path::new(
         destination.file_name().ok_or(DownloadError::Destination)?,
     ))?;
@@ -596,6 +604,15 @@ pub(super) fn verify_file(path: &Path, expected: &FileIdentity) -> Result<(), Do
 
 pub(super) fn verify_reveal(path: &Path, expected: &FileIdentity) -> Result<(), DownloadError> {
     verify_identity(path, expected).map(drop)
+}
+
+/// Inspects a file already written to disk by Chromium's extension download
+/// runtime (`chrome.downloads.download`) and returns its canonical path and
+/// on-disk identity so Aether can record, open, and reveal it.
+pub(super) fn inspect_completed(path: &Path) -> Result<(PathBuf, FileIdentity), DownloadError> {
+    let canonical = fs::canonicalize(path).map_err(io)?;
+    let file = open_payload(&canonical, false)?;
+    Ok((canonical, identity(&file)?))
 }
 
 pub(super) fn prepare_open(

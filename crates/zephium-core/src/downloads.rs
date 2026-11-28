@@ -120,6 +120,21 @@ pub struct FileIdentity {
     pub modified: Option<(i64, i64)>,
 }
 
+/// Valid download provenance: an exact HTTP(S) origin or an exact
+/// `chrome-extension://<id>` origin.
+pub fn valid_download_source(value: &str) -> bool {
+    if crate::permissions::PageOrigin::parse_exact(value).is_ok() {
+        return true;
+    }
+    url::Url::parse(value)
+        .ok()
+        .and_then(|url| {
+            crate::navigation::extension_document_id(&url)
+                .map(|id| format!("chrome-extension://{id}") == value)
+        })
+        .unwrap_or(false)
+}
+
 impl DownloadRecord {
     pub fn validate(&self) -> bool {
         self.writer
@@ -131,7 +146,7 @@ impl DownloadRecord {
             && self.filename.len() <= 240
             && valid_filename(&self.filename)
             && self.source.len() <= 1024
-            && crate::permissions::PageOrigin::parse_exact(&self.source).is_ok()
+            && valid_download_source(&self.source)
             && [&self.destination, &self.staging].into_iter().all(|path| {
                 path.as_ref()
                     .is_none_or(|path| path.is_absolute() && path.as_os_str().len() <= 4096)
@@ -1058,6 +1073,20 @@ mod tests {
             "https://files.example.com/a.zip"
         )));
         assert!(!is_insecure_response(Some("blob:https://example.com/0f1e")));
+    }
+    #[test]
+    fn valid_download_source_accepts_http_and_exact_extension_origins() {
+        assert!(valid_download_source("https://example.com"));
+        assert!(valid_download_source("http://127.0.0.1:8080"));
+        assert!(valid_download_source(
+            "chrome-extension://lmfdoicilocnkcokpdgcnijcfdnmcmkc"
+        ));
+        assert!(!valid_download_source(
+            "chrome-extension://lmfdoicilocnkcokpdgcnijcfdnmcmkc/page.html"
+        ));
+        assert!(!valid_download_source("chrome-extension://not-valid"));
+        assert!(!valid_download_source("file:///C:/Users/test.png"));
+        assert!(!valid_download_source("data:image/png;base64,abc"));
     }
     #[test]
     fn abandoned_native_calls_complete_with_unavailable_once() {

@@ -7,7 +7,7 @@
   },
   "browser-panel-mini": {
     "browser": {
-      "js": 586395,
+      "js": 586425,
       "css": 188003
     },
     "lazy:app/browser/WorkWorkspace.svelte": {
@@ -163,11 +163,11 @@
       "css": 3085
     },
     "lazy:features/settings/components/sections/FocusPage.svelte": {
-      "js": 3962,
+      "js": 3967,
       "css": 52
     },
     "lazy:features/settings/components/sections/GeneralPage.svelte": {
-      "js": 57139,
+      "js": 57137,
       "css": 6180
     },
     "lazy:features/settings/components/sections/KeyboardPage.svelte": {
@@ -183,7 +183,7 @@
       "css": 379
     },
     "lazy:features/settings/components/sections/PrivacyPage.svelte": {
-      "js": 48999,
+      "js": 48986,
       "css": 5389
     },
     "lazy:features/settings/components/sections/ProfilesPage.svelte": {
@@ -463,8 +463,8 @@
       "css": 2750
     },
     "mini": {
-      "js": 213275,
-      "css": 52837
+      "js": 130697,
+      "css": 49591
     },
     "panel": {
       "js": 136531,

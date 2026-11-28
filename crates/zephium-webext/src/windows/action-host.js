@@ -96,5 +96,33 @@
       void refresh();
     }
   });
+  if (chrome.downloads?.onChanged && chrome.downloads?.search) {
+    const reported = new Set();
+    const reportDownload = item => {
+      if (!item || item.state !== 'complete' || !item.filename || reported.has(item.id)) return;
+      if (item.byExtensionId && item.byExtensionId !== chrome.runtime.id) return;
+      reported.add(item.id);
+      if (reported.size > 256) reported.delete(reported.values().next().value);
+      const rawUrl = typeof item.finalUrl === 'string' && item.finalUrl
+        ? item.finalUrl
+        : (typeof item.url === 'string' ? item.url : '');
+      const url = rawUrl && !rawUrl.startsWith('data:') ? rawUrl.slice(0, 2048) : '';
+      chrome.webview.postMessage(JSON.stringify({
+        kind: 'download-completed',
+        path: String(item.filename).slice(0, 4096),
+        url
+      }));
+    };
+    chrome.downloads.onCreated?.addListener(item => {
+      if (item?.state === 'complete') reportDownload(item);
+    });
+    chrome.downloads.onChanged.addListener(delta => {
+      if (delta?.state?.current !== 'complete' || !Number.isInteger(delta.id)) return;
+      chrome.downloads.search({id: delta.id}, items => {
+        if (chrome.runtime.lastError || !Array.isArray(items)) return;
+        for (const item of items) reportDownload(item);
+      });
+    });
+  }
   chrome.webview.postMessage(JSON.stringify({kind: 'ready'}));
 })();

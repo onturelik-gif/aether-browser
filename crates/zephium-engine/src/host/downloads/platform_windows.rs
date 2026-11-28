@@ -388,6 +388,56 @@ fn automatically_restarting(reason: COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON) -> b
 }
 
 impl Downloads {
+    /// Records a download completed natively by Chromium's extension runtime
+    /// (`chrome.downloads.download`), which operates at the profile level and
+    /// does not fire per-WebView `DownloadStarting` events.
+    pub(in crate::host) fn record_extension_download(
+        self: &Rc<Self>,
+        partition: Partition,
+        path: PathBuf,
+        url: Option<String>,
+        extension_id: String,
+    ) {
+        if self.stopping.get()
+            || self.retired.borrow().contains(&partition.profile())
+            || self.work.get() >= MAX_BACKGROUND_WORK
+        {
+            return;
+        }
+        let ext_origin = format!("chrome-extension://{extension_id}");
+        let (source, source_is_context) = match url
+            .as_deref()
+            .filter(|uri| zephium_core::navigation::is_allowed_str(uri))
+            .and_then(|uri| url::Url::parse(uri).ok())
+            .and_then(|parsed| PageOrigin::from_url(&parsed).ok())
+        {
+            Some(origin) => (origin.as_str().to_owned(), false),
+            None if valid_download_source(&ext_origin) => (ext_origin, true),
+            None => return,
+        };
+        self.ensure_timer();
+        if self.timer.borrow().is_none() {
+            return;
+        }
+        self.work.set(self.work.get() + 1);
+        let sender = self.sender.clone();
+        if std::thread::Builder::new()
+            .name("zephium-download-ext-inspect".into())
+            .spawn(move || {
+                let result = super::super::download_files::inspect_completed(&path);
+                let _ = sender.send(Message::ExtensionCompleted {
+                    partition,
+                    source,
+                    source_is_context,
+                    result,
+                });
+            })
+            .is_err()
+        {
+            self.work.set(self.work.get().saturating_sub(1));
+        }
+    }
+
     pub(super) fn ensure_timer(self: &Rc<Self>) {
         let (mut period, slow) = self.tick_period();
         if slow {

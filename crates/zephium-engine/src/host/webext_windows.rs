@@ -732,6 +732,7 @@ impl super::EngineHost {
         let navigation_policy = Rc::new(RefCell::new(None));
         let installed_policy = navigation_policy.clone();
         let frame_extension = extension.to_owned();
+        let download_extension = extension.to_owned();
         let builder = wry::WebViewBuilder::new()
             .with_environment(environment)
             .with_controller_initialization_hook(move |_, core| {
@@ -780,6 +781,30 @@ impl super::EngineHost {
                 };
                 if value["kind"] == "ready" {
                     sink.emit(EngineEvent::ExtensionActionsInvalidated { profile });
+                    return;
+                }
+                if value["kind"] == "download-completed" {
+                    if let Some(path) = value["path"]
+                        .as_str()
+                        .filter(|p| !p.is_empty() && p.len() <= 4096)
+                    {
+                        let path = PathBuf::from(path);
+                        let url = value["url"]
+                            .as_str()
+                            .filter(|u| !u.is_empty() && u.len() <= 2048)
+                            .map(str::to_owned);
+                        let ext_id = download_extension.clone();
+                        super::dispatch::best_effort_with(move |host| {
+                            if let Some(downloads) = &host.downloads {
+                                downloads.record_extension_download(
+                                    zephium_core::ports::engine::Partition::Persistent(profile),
+                                    path,
+                                    url,
+                                    ext_id,
+                                );
+                            }
+                        });
+                    }
                     return;
                 }
                 if value["kind"] != "action" {
