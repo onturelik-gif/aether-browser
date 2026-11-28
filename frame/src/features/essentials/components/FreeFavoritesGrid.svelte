@@ -1,6 +1,8 @@
 <script lang="ts">
   import { tabs } from "$domain/tabs";
+  import { favicons } from "$domain/favicons";
   import * as tabDrag from "$session/tab-drag.svelte";
+  import DragMark from "$shared/ui/DragMark";
   import EssentialTile from "./EssentialTile.svelte";
   import type { SidebarEntry } from "$features/tabs";
   import type { TabView } from "$shared/ipc/bindings";
@@ -37,8 +39,18 @@
   }
 
   let slotMap = $state<Record<string, number>>(loadMap());
-  let draggingKey = $state<string | null>(null);
-  let overSlot = $state<number | null>(null);
+  let dragState = $state<{
+    key: string;
+    tab: TabView;
+    fromSlot: number;
+    startX: number;
+    startY: number;
+    x: number;
+    y: number;
+    active: boolean;
+    overSlot: number | null;
+  } | null>(null);
+  let swallowClick = false;
 
   function saveMap(next: Record<string, number>) {
     slotMap = next;
@@ -47,14 +59,23 @@
     } catch {}
   }
 
-  // Always keep at least 3 rows when favorites exist so user can freely place tiles in top/middle/bottom rows.
+  // Keep enough rows for all tiles + saved slots, and always at least 1 empty row while dragging
+  // so the user can freely move any tile out and leave empty spaces anywhere in the grid.
   let totalSlots = $derived.by(() => {
+    if (favoriteTabs.length === 0) return 0;
     const cols = Math.max(1, columns);
-    const maxAssigned = Object.values(slotMap).reduce((m, v) => (Number.isInteger(v) && v > m ? v : m), -1);
-    const neededByCount = Math.max(cols * 3, Math.ceil(favoriteTabs.length / cols) * cols);
-    const neededByPos = maxAssigned >= 0 ? Math.ceil((maxAssigned + 1) / cols) * cols : 0;
-    const base = Math.max(neededByCount, neededByPos);
-    return favoriteTabs.length === 0 ? 0 : base;
+    const maxAssigned = Object.values(slotMap).reduce(
+      (m, v) => (Number.isInteger(v) && v > m ? v : m),
+      -1,
+    );
+    const minRows = Math.max(3, Math.ceil(favoriteTabs.length / cols));
+    const neededByPos = maxAssigned >= 0 ? Math.ceil((maxAssigned + 1) / cols) : 0;
+    let rows = Math.max(minRows, neededByPos);
+    // While dragging, ensure there's always at least one empty row at the top/bottom to drop into
+    if (dragState?.active && rows * cols <= favoriteTabs.length) {
+      rows += 1;
+    }
+    return rows * cols;
   });
 
   // Resolve each slot index -> TabView | null
@@ -62,7 +83,6 @@
     const out: (TabView | null)[] = Array.from({ length: totalSlots }, () => null);
     const placed = new Set<string>();
 
-    // 1. Place tabs that already have a valid saved slot
     for (const tab of favoriteTabs) {
       const key = tabKey(tab);
       const idx = slotMap[key];
@@ -72,7 +92,6 @@
       }
     }
 
-    // 2. Place remaining tabs into open slots from the bottom row up (nearest the dock)
     for (const tab of favoriteTabs) {
       if (placed.has(tab.id)) continue;
       let chosen = -1;
@@ -92,56 +111,90 @@
 
   function handleContextMenu(event: MouseEvent, tab: TabView) {
     event.preventDefault();
+    dragState = null;
     tabs.openTabMenu(tab.id, event.clientX, event.clientY);
   }
 
-  function onDragStart(e: DragEvent, tab: TabView) {
-    draggingKey = tabKey(tab);
-    e.dataTransfer?.setData("text/plain", draggingKey);
-    if (e.dataTransfer) e.dataTransfer.effectAllowed = "move";
+  function slotAtPoint(x: number, y: number): number | null {
+    const hit = document.elementFromPoint(x, y);
+    const cell = hit?.closest<HTMLElement>("[data-free-slot]");
+    if (!cell) return null;
+    const n = Number(cell.dataset.freeSlot);
+    return Number.isInteger(n) && n >= 0 ? n : null;
   }
 
-  function onDragOver(e: DragEvent, slotIdx: number) {
-    if (!draggingKey) return;
-    e.preventDefault();
-    if (e.dataTransfer) e.dataTransfer.dropEffect = "move";
-    overSlot = slotIdx;
+  function onTilePointerDown(e: PointerEvent, tab: TabView, slotIdx: number) {
+    if (e.button !== 0) return;
+    (e.currentTarget as HTMLElement)?.setPointerCapture?.(e.pointerId);
+    dragState = {
+      key: tabKey(tab),
+      tab,
+      fromSlot: slotIdx,
+      startX: e.clientX,
+      startY: e.clientY,
+      x: e.clientX,
+      y: e.clientY,
+      active: false,
+      overSlot: slotIdx,
+    };
   }
 
-  function onDrop(e: DragEvent, targetSlot: number) {
-    e.preventDefault();
-    const key = draggingKey;
-    draggingKey = null;
-    overSlot = null;
-    if (!key) return;
+  function onTilePointerMove(e: PointerEvent) {
+    if (!dragState) return;
+    const dx = e.clientX - dragState.startX;
+    const dy = e.clientY - dragState.startY;
+    if (!dragState.active && Math.hypot(dx, dy) < 6) return;
+    const over = slotAtPoint(e.clientX, e.clientY);
+    dragState = {
+      ...dragState,
+      active: true,
+      x: e.clientX,
+      y: e.clientY,
+      overSlot: over,
+    };
+  }
 
-    // Build snapshot of current resolved positions so unpinned slots stay put
+  function onTilePointerUp(e: PointerEvent) {
+    const cur = dragState;
+    dragState = null;
+    if (!cur || !cur.active) return;
+
+    swallowClick = true;
+    setTimeout(() => {
+      swallowClick = false;
+    }, 50);
+
+    const targetSlot = slotAtPoint(e.clientX, e.clientY);
+    if (targetSlot === null || targetSlot === cur.fromSlot) return;
+
+    // Snapshot every currently visible tile's exact slot so leaving a slot empty stays empty!
     const next: Record<string, number> = {};
-    let fromSlot = -1;
     for (let i = 0; i < cells.length; i++) {
       const t = cells[i];
       if (!t) continue;
-      const k = tabKey(t);
-      next[k] = i;
-      if (k === key) fromSlot = i;
+      next[tabKey(t)] = i;
     }
 
     const occupant = cells[targetSlot];
-    if (occupant && tabKey(occupant) !== key && fromSlot !== -1) {
-      // Swap
-      next[tabKey(occupant)] = fromSlot;
+    if (occupant && tabKey(occupant) !== cur.key) {
+      // Swap occupant into the dragged tile's previous slot
+      next[tabKey(occupant)] = cur.fromSlot;
     }
-    next[key] = targetSlot;
+    next[cur.key] = targetSlot;
     saveMap(next);
   }
 
-  function onDragEnd() {
-    draggingKey = null;
-    overSlot = null;
+  function onTilePointerCancel() {
+    dragState = null;
+  }
+
+  function handleSelect(id: string) {
+    if (swallowClick) return;
+    onSelect(id);
   }
 
   let activeId = $derived(tabs.activeId());
-  let anyDragging = $derived(draggingKey !== null || tabDrag.draggedId() !== null);
+  let anyDragging = $derived((dragState?.active ?? false) || tabDrag.draggedId() !== null);
 </script>
 
 {#if totalSlots > 0}
@@ -155,28 +208,25 @@
     {#each cells as tab, idx (idx)}
       <li
         class="aether-free-cell"
+        data-free-slot={idx}
         data-empty={tab === null || undefined}
-        data-over={overSlot === idx || undefined}
-        ondragover={(e) => onDragOver(e, idx)}
-        ondragleave={() => {
-          if (overSlot === idx) overSlot = null;
-        }}
-        ondrop={(e) => onDrop(e, idx)}
+        data-over={(dragState?.active && dragState.overSlot === idx) || undefined}
       >
         {#if tab}
           <div
             class="aether-free-item"
-            draggable="true"
             role="presentation"
-            data-dragging-self={draggingKey === tabKey(tab) || undefined}
-            ondragstart={(e) => onDragStart(e, tab)}
-            ondragend={onDragEnd}
+            data-dragging-self={(dragState?.active && dragState.key === tabKey(tab)) || undefined}
+            onpointerdown={(e) => onTilePointerDown(e, tab, idx)}
+            onpointermove={onTilePointerMove}
+            onpointerup={onTilePointerUp}
+            onpointercancel={onTilePointerCancel}
           >
             <EssentialTile
               {tab}
               active={tab.id === activeId}
               splitCandidate={false}
-              {onSelect}
+              onSelect={handleSelect}
               onContextMenu={handleContextMenu}
               onPointerDown={() => {}}
               onPointerMove={() => {}}
@@ -190,6 +240,16 @@
   </ul>
 {/if}
 
+{#if dragState?.active}
+  <DragMark
+    x={dragState.x}
+    y={dragState.y}
+    image={favicons.image(dragState.tab.icon)}
+    tone={favicons.tone(dragState.tab.icon)}
+    title=""
+  />
+{/if}
+
 <style>
   .aether-free-grid {
     display: grid;
@@ -199,6 +259,7 @@
     margin: 0;
     padding: 0;
     width: 100%;
+    user-select: none;
   }
 
   .aether-free-cell {
@@ -209,22 +270,23 @@
   }
 
   .aether-free-grid[data-dragging] .aether-free-cell[data-empty] {
-    background: rgba(255, 255, 255, 0.03);
-    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.1);
+    background: rgba(255, 255, 255, 0.04);
+    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.14);
   }
 
   .aether-free-cell[data-over] {
-    background: rgba(56, 189, 248, 0.14) !important;
-    box-shadow: inset 0 0 0 1.5px rgba(56, 189, 248, 0.7) !important;
+    background: rgba(56, 189, 248, 0.16) !important;
+    box-shadow: inset 0 0 0 1.5px rgba(56, 189, 248, 0.78) !important;
   }
 
   .aether-free-item {
     width: 100%;
     height: 100%;
+    touch-action: none;
   }
 
   .aether-free-item[data-dragging-self] {
-    opacity: 0.35;
+    opacity: 0.28;
   }
 
   .aether-free-item :global(> li.essential) {

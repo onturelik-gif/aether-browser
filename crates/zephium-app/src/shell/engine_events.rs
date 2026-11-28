@@ -468,7 +468,13 @@ impl Shell {
                     self.close_owned_native_tab(id);
                 }
             }
-            EngineEvent::NewWindowRequested { id, url } => self.open_linked_tab(id, &url),
+            EngineEvent::NewWindowRequested { id, url } => {
+                if let Some(glance_url) = url.strip_prefix("aether-glance:") {
+                    self.open_glance(id, glance_url);
+                } else {
+                    self.open_linked_tab(id, &url);
+                }
+            }
             EngineEvent::WorkPageFavicon {
                 profile,
                 page_url,

@@ -1491,6 +1491,20 @@ impl EngineHost {
                 // A new window does not say which frame asked, so no kept
                 // answer opens it.
                 if features.user_initiated
+                    && features
+                        .size
+                        .is_some_and(|s| (s.width - 917.0).abs() < 2.0 && (s.height - 617.0).abs() < 2.0)
+                {
+                    permit.emit(
+                        &popup_sink,
+                        EngineEvent::NewWindowRequested {
+                            id: source.get(),
+                            url: format!("aether-glance:{url}"),
+                        },
+                    );
+                    return wry::NewWindowResponse::Deny;
+                }
+                if features.user_initiated
                     && popup_app_link(&url, true, zephium_core::navigation::AppLinkSource::Unknown)
                 {
                     return wry::NewWindowResponse::Deny;
@@ -1562,6 +1576,36 @@ impl EngineHost {
                 script.source.as_ref(),
                 !script.all_frames,
             );
+        }
+        {
+            let mod_str = crate::current_glance_mod();
+            let glance_js = format!(
+                r#"(function(){{
+if(window.__aetherGlanceInstalled)return;
+window.__aetherGlanceInstalled=true;
+window.__aetherGlanceMod={mod_str:?};
+window.addEventListener("click",function(e){{
+  if(e.button!==0||e.defaultPrevented)return;
+  var m=window.__aetherGlanceMod||"alt";
+  if(m==="off")return;
+  var ok=(m==="alt"&&e.altKey&&!e.ctrlKey&&!e.shiftKey&&!e.metaKey)
+    ||(m==="ctrl"&&e.ctrlKey&&!e.altKey&&!e.shiftKey&&!e.metaKey)
+    ||(m==="shift"&&e.shiftKey&&!e.altKey&&!e.ctrlKey&&!e.metaKey);
+  if(!ok)return;
+  var el=e.target;
+  while(el&&el.nodeType===1&&el.tagName!=="A")el=el.parentElement;
+  if(!el||!el.href)return;
+  try{{
+    var u=new URL(el.href,location.href);
+    if(u.protocol!=="http:"&&u.protocol!=="https:")return;
+    e.preventDefault();
+    e.stopPropagation();
+    window.open(u.href,"_blank","popup,width=917,height=617");
+  }}catch(_){{}}
+}},true);
+}})();"#
+            );
+            builder = builder.with_initialization_script_for_main_only(&glance_js, false);
         }
         #[cfg(all(
             feature = "blocker-bench",

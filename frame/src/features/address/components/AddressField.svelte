@@ -65,6 +65,112 @@
   let editing = $state(false);
   let pending = $state(false);
   let failed = $state(false);
+  let addrMenu = $state<{ x: number; y: number; hasSelection: boolean } | null>(null);
+
+  function openAddressMenu(event: MouseEvent) {
+    event.preventDefault();
+    event.stopPropagation();
+    if (!editing) {
+      input.focus();
+    }
+    const start = input.selectionStart ?? 0;
+    const end = input.selectionEnd ?? 0;
+    const x = Math.min(event.clientX, Math.max(8, window.innerWidth - 192));
+    const y = Math.min(event.clientY, Math.max(8, window.innerHeight - 185));
+    addrMenu = { x, y, hasSelection: end > start };
+    if (preferences.value("sidebar.mode") === "top") {
+      void commands.runCommand(`topbar.popover=${Math.round(x)},${Math.round(y)},184,176`).catch(() => {});
+    }
+  }
+
+  function closeAddressMenu() {
+    if (!addrMenu) return;
+    addrMenu = null;
+    if (preferences.value("sidebar.mode") === "top") {
+      void commands.runCommand("topbar.popover=off").catch(() => {});
+    }
+  }
+
+  async function addrCut() {
+    const start = input.selectionStart ?? 0;
+    const end = input.selectionEnd ?? 0;
+    if (end > start) {
+      const selected = input.value.slice(start, end);
+      try {
+        await navigator.clipboard.writeText(selected);
+      } catch {}
+      draft = input.value.slice(0, start) + input.value.slice(end);
+      editing = true;
+      flushSync();
+      input.focus();
+      input.setSelectionRange(start, start);
+    }
+    closeAddressMenu();
+  }
+
+  async function addrCopy() {
+    const start = input.selectionStart ?? 0;
+    const end = input.selectionEnd ?? 0;
+    const text = end > start ? input.value.slice(start, end) : editingAddress(failedUrl ?? activeUrl) || input.value;
+    if (text) {
+      try {
+        await navigator.clipboard.writeText(text);
+      } catch {}
+    }
+    closeAddressMenu();
+  }
+
+  async function addrPaste(andGo = false) {
+    let text = "";
+    try {
+      text = (await navigator.clipboard.readText()) ?? "";
+    } catch {}
+    closeAddressMenu();
+    if (!text) return;
+    const clean = text.replace(/\r?\n/g, " ").trim();
+    if (andGo) {
+      draft = clean;
+      editing = false;
+      const id = tabs.activeId();
+      if (id === null) void commands.browserOpenUrl(clean, false);
+      else void commands.tabsNavigate(id, clean);
+      input.blur();
+      return;
+    }
+    const start = input.selectionStart ?? input.value.length;
+    const end = input.selectionEnd ?? input.value.length;
+    draft = input.value.slice(0, start) + clean + input.value.slice(end);
+    editing = true;
+    flushSync();
+    input.focus();
+    const caret = start + clean.length;
+    input.setSelectionRange(caret, caret);
+  }
+
+  function addrSelectAll() {
+    closeAddressMenu();
+    input.focus();
+    input.select();
+  }
+
+  $effect(() => {
+    if (!addrMenu) return;
+    const onDown = (e: PointerEvent) => {
+      if (e.target instanceof Element && e.target.closest(".addr-ctx-menu")) return;
+      closeAddressMenu();
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") closeAddressMenu();
+    };
+    window.addEventListener("pointerdown", onDown, true);
+    window.addEventListener("keydown", onKey, true);
+    window.addEventListener("blur", closeAddressMenu);
+    return () => {
+      window.removeEventListener("pointerdown", onDown, true);
+      window.removeEventListener("keydown", onKey, true);
+      window.removeEventListener("blur", closeAddressMenu);
+    };
+  });
   // What hangs from the field (its tray) is as wide as the field.
   let fieldWidth = $state(0);
   let composing = false;
@@ -263,6 +369,7 @@
   $effect(() => {
     if (!editing) return;
     const press = (event: PointerEvent) => {
+      if (event.target instanceof Element && event.target.closest(".addr-ctx-menu")) return;
       if (!(event.target instanceof Node) || !form.contains(event.target)) input.blur();
     };
     const away = () => input.blur();
@@ -375,6 +482,7 @@
         aria-describedby={failed ? "address-error" : undefined}
         onfocus={beginEditing}
         onblur={endEditing}
+        oncontextmenu={openAddressMenu}
         style:text-align={editing ? "start" : "center"}
         style:direction={editing ? null : "rtl"}
         style:padding-left={editing ? "0" : "var(--address-centering)"}
@@ -502,7 +610,103 @@
   {/if}
 </form>
 
+{#if addrMenu}
+  <div
+    class="addr-ctx-menu"
+    role="menu"
+    style:left={`${addrMenu.x}px`}
+    style:top={`${addrMenu.y}px`}
+  >
+    <button
+      type="button"
+      role="menuitem"
+      class="addr-ctx-item"
+      disabled={!addrMenu.hasSelection}
+      onclick={() => void addrCut()}
+    >
+      Kes
+    </button>
+    <button
+      type="button"
+      role="menuitem"
+      class="addr-ctx-item"
+      onclick={() => void addrCopy()}
+    >
+      Kopyala
+    </button>
+    <button
+      type="button"
+      role="menuitem"
+      class="addr-ctx-item"
+      onclick={() => void addrPaste(false)}
+    >
+      Yapıştır
+    </button>
+    <button
+      type="button"
+      role="menuitem"
+      class="addr-ctx-item"
+      onclick={() => void addrPaste(true)}
+    >
+      Yapıştır ve Git
+    </button>
+    <div class="addr-ctx-sep" role="separator"></div>
+    <button
+      type="button"
+      role="menuitem"
+      class="addr-ctx-item"
+      onclick={addrSelectAll}
+    >
+      Tümünü Seç
+    </button>
+  </div>
+{/if}
+
 <style>
+  .addr-ctx-menu {
+    position: fixed;
+    z-index: 999;
+    min-width: 176px;
+    padding: 5px;
+    border-radius: 12px;
+    background: var(--color-float, #23262e);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.48);
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .addr-ctx-item {
+    display: flex;
+    align-items: center;
+    width: 100%;
+    padding: 6px 10px;
+    border: 0;
+    border-radius: 8px;
+    background: transparent;
+    color: var(--color-text);
+    font-size: 12.5px;
+    text-align: left;
+    cursor: pointer;
+    transition: background-color 100ms ease;
+  }
+
+  .addr-ctx-item:hover:not(:disabled) {
+    background: var(--row-hover, rgba(255, 255, 255, 0.1));
+  }
+
+  .addr-ctx-item:disabled {
+    opacity: 0.4;
+    cursor: default;
+  }
+
+  .addr-ctx-sep {
+    height: 1px;
+    margin: 3px 6px;
+    background: rgba(255, 255, 255, 0.08);
+  }
+
   .store-remove {
     display: flex;
     align-items: center;

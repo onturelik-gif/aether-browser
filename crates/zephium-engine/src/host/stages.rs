@@ -396,6 +396,19 @@ impl EngineHost {
         }
     }
 
+    #[cfg(target_os = "windows")]
+    pub(crate) fn set_chrome_popover(&mut self, window: WindowId, popover: Option<Rect>) {
+        if let Some(stage) = self.stages.get(&window) {
+            stage.set_chrome_popover(popover);
+        }
+    }
+
+    pub(crate) fn evaluate_all_views(&self, script: &str) {
+        for view in self.views.values() {
+            let _ = view.evaluate_script(script);
+        }
+    }
+
     #[cfg(not(target_os = "macos"))]
     fn apply_content(
         &mut self,

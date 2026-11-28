@@ -192,12 +192,18 @@
     border-radius: var(--radius-inset);
     background: none;
     color: var(--color-faint);
-    cursor: default;
-    opacity: 0;
+    cursor: pointer;
+    opacity: 0.5;
     outline: none;
     transition:
       opacity var(--motion-instant) var(--ease-smooth),
+      color var(--motion-instant) var(--ease-smooth),
       background-color var(--motion-instant) var(--ease-smooth);
+  }
+
+  .pin[aria-pressed="true"] {
+    opacity: 1;
+    color: #38bdf8;
   }
 
   .pin:focus-visible {

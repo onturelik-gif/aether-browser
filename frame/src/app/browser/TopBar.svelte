@@ -4,6 +4,7 @@
     ArrowLeft02Icon,
     ArrowRight01Icon,
     Cancel01Icon,
+    Download04Icon,
     Globe02Icon,
     IncognitoIcon,
     PinIcon,
@@ -22,13 +23,15 @@
   import { favicons } from "$domain/favicons";
   import { preferences } from "$domain/preferences";
   import { profiles } from "$domain/profiles";
+  import { surface } from "$domain/surface";
   import { updates } from "$domain/updates";
   import { commands } from "$shared/ipc/bindings";
   import { reducedMotion } from "$shared/lib/motion";
   import { duration } from "$shared/lib/motion";
   import { AddressField, SiteDetails, SiteHead } from "$features/address";
   import { BlockerShield } from "$features/blocker";
-  import { ExtensionsSection } from "$features/extensions";
+  import DownloadsPopover from "$features/downloads/components/DownloadsPopover.svelte";
+  import { ExtensionsSection, PinnedExtensions } from "$features/extensions";
   import { UtilityTray } from "$features/sidebar";
   import { sidebarTree } from "$features/tabs";
   import {
@@ -259,6 +262,7 @@
   let peeking = $state(false);
   let pointerIn = $state(false);
   let extOpen = $state(false);
+  let dlOpen = $state(false);
   let utilityOpen = $state(false);
 
   let chromeRaised = false;
@@ -321,7 +325,7 @@
   }
 
   function needed(): boolean {
-    if (extOpen || utilityOpen || drag.ghost !== null || bmDrag?.active) return true;
+    if (extOpen || dlOpen || utilityOpen || drag.ghost !== null || bmDrag?.active) return true;
     const active = document.activeElement;
     return (
       document.hasFocus() &&
@@ -380,23 +384,50 @@
   });
 
   $effect(() => {
-    const anyPopover = extOpen || utilityOpen;
+    const anyPopover = extOpen || dlOpen || utilityOpen;
     if (!anyPopover) {
       void commands.runCommand("topbar.popover=off").catch(() => {});
-    } else {
-      requestAnimationFrame(() => {
-        const panel = headerEl?.querySelector<HTMLElement>('.ui-disclosure-panel[data-open="true"]');
-        const r = panel?.getBoundingClientRect();
-        const cmd =
-          r && r.width > 10 && r.height > 10
-            ? `topbar.popover=${Math.max(0, Math.round(r.left - 8))},${Math.max(0, Math.round(r.top - 8))},${Math.round(r.width + 16)},${Math.round(r.height + 16)}`
-            : `topbar.popover=${Math.max(0, Math.round(window.innerWidth - 330))},64,316,300`;
-        void commands.runCommand(cmd).catch(() => {});
-      });
+      if (away && peeking && !pointerIn && !atEdge && !overCard) untrack(() => release());
+      return;
     }
-    if (!away) return;
-    if (anyPopover) untrack(() => peek());
-    else if (peeking && !pointerIn && !atEdge && !overCard) untrack(() => release());
+    if (away) untrack(() => peek());
+
+    let disposed = false;
+    let observer: ResizeObserver | undefined;
+    let settleTimer: ReturnType<typeof setTimeout> | undefined;
+
+    const sendRect = () => {
+      if (disposed) return;
+      const panel = headerEl?.querySelector<HTMLElement>('.ui-disclosure-panel[data-open="true"]');
+      if (!panel) return;
+      const r = panel.getBoundingClientRect();
+      // Undo in-flight scale(0.96) transform so Win32 clip matches final panel edges pixel-for-pixel.
+      const w = Math.max(r.width, panel.offsetWidth);
+      const h = Math.max(r.height, panel.offsetHeight);
+      if (w <= 10 || h <= 10) return;
+      const alignEnd = panel.dataset.align === "end";
+      const left = alignEnd ? r.right - w : r.left;
+      const top = r.top;
+      const cmd = `topbar.popover=${Math.max(0, Math.floor(left))},${Math.max(0, Math.floor(top))},${Math.ceil(w)},${Math.ceil(h)}`;
+      void commands.runCommand(cmd).catch(() => {});
+    };
+
+    const raf = requestAnimationFrame(() => {
+      sendRect();
+      const panel = headerEl?.querySelector<HTMLElement>('.ui-disclosure-panel[data-open="true"]');
+      if (panel && typeof ResizeObserver !== "undefined") {
+        observer = new ResizeObserver(() => sendRect());
+        observer.observe(panel);
+      }
+      settleTimer = setTimeout(sendRect, 200);
+    });
+
+    return () => {
+      disposed = true;
+      cancelAnimationFrame(raf);
+      clearTimeout(settleTimer);
+      observer?.disconnect();
+    };
   });
 
   onMount(() => {
@@ -782,11 +813,12 @@
           <span>{updateBusy ? "Güncelleniyor…" : "Güncelle"}</span>
         </button>
       {/if}
+      <PinnedExtensions alwaysVisible />
       <Disclosure
         label="Eklentiler"
         triggerTitle="Eklentiler"
         triggerClass="topbar-icon-btn"
-        panelClass="utilities-panel sidebar-softens"
+        panelClass="utilities-panel topbar-floating-panel sidebar-softens"
         align="end"
         onopen={() => {
           extOpen = true;
@@ -802,6 +834,28 @@
         <div class="topbar-ext-popup">
           <ExtensionsSection />
         </div>
+      </Disclosure>
+      <Disclosure
+        label="İndirilenler"
+        triggerTitle="İndirilenler"
+        triggerClass="topbar-icon-btn"
+        panelClass="topbar-floating-panel sidebar-softens"
+        align="end"
+        onopen={() => {
+          dlOpen = true;
+          clearTimeout(linger);
+        }}
+        onclose={() => {
+          dlOpen = false;
+        }}
+      >
+        {#snippet trigger()}
+          <Icon icon={Download04Icon} size={15} />
+        {/snippet}
+        <DownloadsPopover
+          profile={tabs.profile()?.id ?? ""}
+          onShowAll={() => void surface.open("downloads")}
+        />
       </Disclosure>
       <button
         type="button"
@@ -1266,10 +1320,24 @@
   .topbar-address {
     flex: 1;
     min-width: 0;
+    display: flex;
+    align-items: center;
+  }
+
+  .topbar-address :global(form) {
+    width: 100%;
+    padding-bottom: 0 !important;
+    margin: 0 !important;
   }
 
   .topbar-address :global(.field) {
     margin: 0 !important;
+  }
+
+  :global(.aether-topbar .topbar-floating-panel) {
+    background: var(--color-float, #23262e) !important;
+    backdrop-filter: none !important;
+    border: 1px solid rgba(255, 255, 255, 0.1);
   }
 
   /* Row 3: Classic Bookmarks Bar */

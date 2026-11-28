@@ -79,17 +79,15 @@ pub(super) fn is_on_top(parent: HWND, chrome: HWND) -> bool {
     unsafe { GetWindow(parent, GW_CHILD) }.ok() == Some(chrome)
 }
 
-/// Cuts `chrome` to `card`, rounded by `diameter`, and to whatever of
-/// `parent`'s `client` area its other windows leave bare: the chrome round
-/// the pages stays in view, and the card comes over the page alone.
+/// Cuts `chrome` to `cards` (each rounded by its own diameter), and to whatever
+/// of `parent`'s `client` area its other windows leave bare: the chrome round
+/// the pages stays in view, and only the card/popover rects come over the page.
 pub(super) fn clip_chrome(
     parent: HWND,
     chrome: HWND,
     client: (i32, i32),
-    card: PixelRect,
-    diameter: i32,
+    cards: &[(PixelRect, i32)],
 ) -> bool {
-    let (x, y, width, height) = card;
     // SAFETY: every region made here is handed to the window or deleted, and
     // the windows read are `parent`'s live children.
     unsafe {
@@ -134,17 +132,19 @@ pub(super) fn clip_chrome(
         if !piece.0.is_null() {
             let _ = DeleteObject(piece.into());
         }
-        let rounded = CreateRoundRectRgn(
-            x,
-            y,
-            x.saturating_add(width).saturating_add(1),
-            y.saturating_add(height).saturating_add(1),
-            diameter,
-            diameter,
-        );
-        if !rounded.0.is_null() {
-            let _ = CombineRgn(Some(region), Some(region), Some(rounded), RGN_OR);
-            let _ = DeleteObject(rounded.into());
+        for &((x, y, width, height), diameter) in cards {
+            let rounded = CreateRoundRectRgn(
+                x,
+                y,
+                x.saturating_add(width).saturating_add(1),
+                y.saturating_add(height).saturating_add(1),
+                diameter,
+                diameter,
+            );
+            if !rounded.0.is_null() {
+                let _ = CombineRgn(Some(region), Some(region), Some(rounded), RGN_OR);
+                let _ = DeleteObject(rounded.into());
+            }
         }
         // The system owns the region only when SetWindowRgn succeeds.
         if SetWindowRgn(chrome, Some(region), true) == 0 {

@@ -188,7 +188,9 @@ struct State {
     /// Where the hidden sidebar's card stands over the page, while the
     /// chrome is up for it, and what has been cut to for it.
     card: Option<Rect>,
-    card_clip: Option<(PhysicalRect, i32, Vec<PhysicalRect>)>,
+    /// Auxiliary floating chrome popover (e.g., TopBar extensions/downloads dropdown).
+    popover: Option<Rect>,
+    card_clip: Option<(Vec<(PhysicalRect, i32)>, Vec<PhysicalRect>)>,
     /// The card on its way in or out, and the timer that steps the cut.
     card_motion: Option<CardMotion>,
     card_tick: Option<super::ContentPolicyTimeout>,
@@ -434,6 +436,7 @@ impl Stage {
             fullscreen: None,
             chrome: None,
             card: None,
+            popover: None,
             card_clip: None,
             card_motion: None,
             card_tick: None,
@@ -715,6 +718,15 @@ impl Stage {
             state.card = raised.then_some(card);
         }
         drop(state);
+        settle_card(&self.state);
+    }
+
+    pub fn set_chrome_popover(&self, popover: Option<Rect>) {
+        if let Ok(mut state) = self.state.try_borrow_mut() {
+            state.popover = popover;
+        } else {
+            return;
+        }
         settle_card(&self.state);
     }
 
@@ -1744,7 +1756,7 @@ fn sync(state: &Rc<RefCell<State>>) {
 /// the card's shadow on the pages, for as long as the card is out; and puts
 /// it back as it was when it is not. A fullscreen page stays above all.
 fn settle_card(state: &Rc<RefCell<State>>) {
-    let (parent, card, chrome, clip, pages, away, moving) = {
+    let (parent, card, popover, chrome, clip, pages, away, moving) = {
         let Ok(mut state) = state.try_borrow_mut() else {
             return;
         };
@@ -1773,6 +1785,7 @@ fn settle_card(state: &Rc<RefCell<State>>) {
         (
             state.parent,
             state.card.filter(|_| state.fullscreen.is_none()),
+            state.popover.filter(|_| state.fullscreen.is_none()),
             state.chrome,
             state.card_clip.clone(),
             pages,
@@ -1783,7 +1796,7 @@ fn settle_card(state: &Rc<RefCell<State>>) {
     if moving {
         step_card(state);
     }
-    let Some(card) = card else {
+    if card.is_none() && popover.is_none() {
         if clip.is_some() {
             let lowered = chrome.is_none_or(|chrome| {
                 super::sidebar_card::is_live(chrome)
@@ -1797,26 +1810,46 @@ fn settle_card(state: &Rc<RefCell<State>>) {
         }
         super::sidebar_card::lift();
         return;
-    };
+    }
     let scale = scale_of(parent);
     let mut client = RECT::default();
     if unsafe { GetClientRect(parent, &mut client) }.is_err() {
         return;
     }
-    let Some(placed) =
-        crate::card_geometry::card_pixels(card, (client.right, client.bottom), scale)
-    else {
+    let card_diameter = ((RADIUS * scale * 2.0).round() as i32).max(1);
+    let popover_diameter = ((16.0 * scale * 2.0).round() as i32).max(1);
+    let mut cards: Vec<(PhysicalRect, i32)> = Vec::new();
+    let mut shadow_rect: Option<PhysicalRect> = None;
+    if let Some(card) = card {
+        if let Some(placed) =
+            crate::card_geometry::card_pixels(card, (client.right, client.bottom), scale)
+        {
+            let is_top_card = card.width > card.height
+                && card.width >= (client.right as f64 / scale) - 3.0 * card.x;
+            let rect = if is_top_card {
+                let travel = ((card.height + CARD_AWAY) * scale * away).round() as i32;
+                (placed.0, placed.1 - travel, placed.2, placed.3)
+            } else {
+                let travel = ((card.width + CARD_AWAY) * scale * away).round() as i32;
+                (placed.0 - travel, placed.1, placed.2, placed.3)
+            };
+            shadow_rect = Some(rect);
+            cards.push((rect, card_diameter));
+        }
+    }
+    if let Some(pop) = popover {
+        if let Some(placed) =
+            crate::card_geometry::card_pixels(pop, (client.right, client.bottom), scale)
+        {
+            if shadow_rect.is_none() {
+                shadow_rect = Some(placed);
+            }
+            cards.push((placed, popover_diameter));
+        }
+    }
+    if cards.is_empty() {
         return;
-    };
-    let is_top_card = card.width > card.height
-        && card.width >= (client.right as f64 / scale) - 3.0 * card.x;
-    let rect = if is_top_card {
-        let travel = ((card.height + CARD_AWAY) * scale * away).round() as i32;
-        (placed.0, placed.1 - travel, placed.2, placed.3)
-    } else {
-        let travel = ((card.width + CARD_AWAY) * scale * away).round() as i32;
-        (placed.0 - travel, placed.1, placed.2, placed.3)
-    };
+    }
     let chrome = match chrome.filter(|chrome| super::sidebar_card::is_live(*chrome)) {
         Some(chrome) => chrome,
         None => {
@@ -1830,16 +1863,14 @@ fn settle_card(state: &Rc<RefCell<State>>) {
             found
         }
     };
-    let diameter = ((RADIUS * scale * 2.0).round() as i32).max(1);
     let shown: Vec<PhysicalRect> = pages.iter().filter_map(|(_, rect)| *rect).collect();
-    let key = (rect, diameter, shown);
+    let key = (cards.clone(), shown);
     if clip.as_ref() != Some(&key)
         && super::sidebar_card::clip_chrome(
             parent,
             chrome,
             (client.right, client.bottom),
-            rect,
-            diameter,
+            &cards,
         )
     {
         if let Ok(mut state) = state.try_borrow_mut() {
@@ -1858,7 +1889,9 @@ fn settle_card(state: &Rc<RefCell<State>>) {
             })
         })
         .collect();
-    super::sidebar_card::cast(&placements, rect, scale, dark_theme(parent));
+    if let Some(rect) = shadow_rect {
+        super::sidebar_card::cast(&placements, rect, scale, dark_theme(parent));
+    }
 }
 
 /// Moves the card's cut on by a display frame's worth, on the stage's own

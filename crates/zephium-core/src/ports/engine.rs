@@ -986,6 +986,13 @@ pub trait Engine {
     ) -> NativeDispatch {
         NativeDispatch::Unsupported
     }
+    /// Sets or clears an auxiliary floating chrome popover region (such as a
+    /// TopBar dropdown) clipped cleanly over page views without resizing them.
+    fn set_chrome_popover(&self, _window: WindowId, _popover: Option<Rect>) -> NativeDispatch {
+        NativeDispatch::Unsupported
+    }
+    /// Sets the link-click modifier key for Glance preview ("alt", "ctrl", "shift", "off").
+    fn set_glance_mod(&self, _mode: &str) {}
     /// Asks the next content layout applied to `window` to move rather than
     /// jump, because it follows a deliberate change of the window's shape
     /// and not a resize. Consumed by that layout whether or not it moved

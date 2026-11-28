@@ -1,5 +1,16 @@
 #[cfg(feature = "agentic-browser")]
 mod agent_context_port;
+
+static GLANCE_MOD: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(1);
+
+pub(crate) fn current_glance_mod() -> &'static str {
+    match GLANCE_MOD.load(std::sync::atomic::Ordering::Relaxed) {
+        0 => "off",
+        2 => "ctrl",
+        3 => "shift",
+        _ => "alt",
+    }
+}
 #[cfg(any(target_os = "macos", test))]
 mod background_groups;
 #[cfg(feature = "agentic-browser")]
@@ -3487,6 +3498,37 @@ impl Engine for WebviewEngine {
             let _ = (window, raised, card, slide);
             NativeDispatch::Unsupported
         }
+    }
+
+    fn set_chrome_popover(&self, window: WindowId, popover: Option<Rect>) -> NativeDispatch {
+        #[cfg(target_os = "windows")]
+        {
+            NativeDispatch::from_scheduled(self.run(move || {
+                let _ = host::try_with(move |host| host.set_chrome_popover(window, popover));
+            }))
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = (window, popover);
+            NativeDispatch::Unsupported
+        }
+    }
+
+    fn set_glance_mod(&self, mode: &str) {
+        let code = match mode {
+            "off" => 0,
+            "ctrl" => 2,
+            "shift" => 3,
+            _ => 1,
+        };
+        GLANCE_MOD.store(code, std::sync::atomic::Ordering::Relaxed);
+        let js_mode = current_glance_mod();
+        let script = format!("window.__aetherGlanceMod={js_mode:?};");
+        let _ = self.run(move || {
+            let _ = host::try_with(move |host| {
+                host.evaluate_all_views(&script);
+            });
+        });
     }
 
     fn zoom(&self, id: ItemId, scale: f64, request: ZoomRequestId) -> NativeDispatch {

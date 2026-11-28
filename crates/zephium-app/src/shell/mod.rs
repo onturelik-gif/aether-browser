@@ -258,6 +258,8 @@ pub struct Shell {
     recent_tabs: recent_tabs::RecentTabs,
     tab_previews: tab_previews::TabPreviews,
     mini: mini::MiniState,
+    /// Active Glance preview overlay: (glance_tab_id, parent_tab_id, url).
+    glance: Option<(ItemId, ItemId, String)>,
     pending_size: Size,
     favicons: FaviconState,
     history: history::HistoryState,
@@ -535,6 +537,7 @@ impl Shell {
             recently_closed: Vec::new(),
             windows: Windows::default(),
             mini: mini::MiniState::default(),
+            glance: None,
             pending_size: Size::default(),
             favicons: FaviconState::default(),
             history: history::HistoryState::default(),

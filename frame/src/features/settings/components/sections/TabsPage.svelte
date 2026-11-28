@@ -1,6 +1,7 @@
 <script lang="ts">
   import * as m from "$shared/i18n/messages";
   import { preferences } from "$domain/preferences";
+  import { commands } from "$shared/ipc/bindings";
   import SegmentedControl from "$shared/ui/SegmentedControl";
   import SettingsGroup from "$shared/ui/SettingsGroup";
   import SettingsRow from "$shared/ui/SettingsRow";
@@ -8,6 +9,18 @@
   import PreferenceSwitch from "../PreferenceSwitch.svelte";
 
   let tabLayout = $derived(preferences.value("sidebar.mode") === "top" ? "top" : "sidebar");
+  let glanceMod = $state<string>(
+    typeof localStorage === "undefined"
+      ? "alt"
+      : localStorage.getItem("aether.glance.mod") || "alt",
+  );
+  function setGlanceMod(next: string) {
+    glanceMod = next;
+    try {
+      localStorage.setItem("aether.glance.mod", next);
+    } catch {}
+    void commands.runCommand(`glance.mod=${next}`).catch(() => {});
+  }
 </script>
 
 <SettingsGroup title="Sekme Düzeni">
@@ -26,6 +39,24 @@
         { value: "top", label: "Yukarıda (Klasik)" },
       ]}
       onchange={(v) => void preferences.set("sidebar.mode", v === "top" ? "top" : "default")}
+    />
+  </SettingsRow>
+  <SettingsRow
+    settingId="tabs.glance"
+    title="Glance (Hızlı Önizleme)"
+    description="Seçilen tuşa basılı tutarak bir bağlantıya tıkladığında sayfayı mevcut sekmenin üstünde önizleme penceresinde aç."
+  >
+    <SegmentedControl
+      label="Glance kısayolu"
+      size="compact"
+      value={glanceMod}
+      options={[
+        { value: "alt", label: "Alt + Tık" },
+        { value: "ctrl", label: "Ctrl + Tık" },
+        { value: "shift", label: "Shift + Tık" },
+        { value: "off", label: "Kapalı" },
+      ]}
+      onchange={setGlanceMod}
     />
   </SettingsRow>
 </SettingsGroup>

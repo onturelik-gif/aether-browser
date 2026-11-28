@@ -1055,6 +1055,73 @@ impl Shell {
         )));
     }
 
+    pub(super) fn open_glance(&mut self, source: ItemId, url: &str) {
+        if let Some((old_id, _, _)) = self.glance.take() {
+            let fx = self.items.remove(old_id);
+            self.commit(fx);
+        }
+        let Some((profile, space)) = self.windows.focused().map(|win| (win.profile, win.space))
+        else {
+            return;
+        };
+        if !self.item_in_scope(source, profile, space) {
+            return;
+        }
+        let today = Placement::Space {
+            space,
+            section: SpaceSection::Today,
+        };
+        let id = ItemId::generate();
+        if !self.items.insert_tab(id, today) {
+            return;
+        }
+        let next = {
+            let roots = self.items.roots(today);
+            roots
+                .iter()
+                .position(|root| *root == source)
+                .and_then(|at| roots.get(at + 1).copied())
+                .filter(|next| *next != id)
+        };
+        if let Some(next) = next {
+            self.items.move_tab_to_root(id, today, Some(next));
+        }
+        let fx = self.items.navigate(id, url);
+        self.glance = Some((id, source, url.to_string()));
+        self.commit(fx);
+        let _ = self.relayout();
+        (self.emit)(Projection::UiCommand(format!("glance.open={url}")));
+    }
+
+    pub(super) fn close_glance(&mut self) {
+        let Some((glance_id, _, _)) = self.glance.take() else {
+            return;
+        };
+        let fx = self.items.remove(glance_id);
+        self.commit(fx);
+        let _ = self.relayout();
+        (self.emit)(Projection::UiCommand("glance.close".into()));
+    }
+
+    pub(super) fn expand_glance(&mut self) {
+        let Some((glance_id, _, _)) = self.glance.take() else {
+            return;
+        };
+        self.focus_tab(glance_id);
+        let _ = self.relayout();
+        (self.emit)(Projection::UiCommand("glance.close".into()));
+    }
+
+    pub(super) fn split_glance(&mut self) {
+        let Some((glance_id, parent_id, _)) = self.glance.take() else {
+            return;
+        };
+        self.focus_tab(parent_id);
+        let _ = self.operation_split(glance_id, Axis::Row);
+        let _ = self.relayout();
+        (self.emit)(Projection::UiCommand("glance.close".into()));
+    }
+
     /// A new Today tab of `space` for an ordinary web page, right after
     /// `after` when that tab is a root of the same Today, never focused:
     /// the active tab, window focus and split stay as they are.

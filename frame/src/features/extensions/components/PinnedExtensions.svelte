@@ -7,6 +7,8 @@
   import { holdWhilePopupOpen } from "../lib/popup-hold";
   import { openButtonMenu } from "../lib/button-menu";
 
+  let { alwaysVisible = false }: { alwaysVisible?: boolean } = $props();
+
   let profileId = $derived(tabs.profile()?.id ?? null);
   let tabId = $derived(tabs.activeId());
   let pinned = $derived(
@@ -36,7 +38,12 @@
   the plus; the tray on the address holds the rest.
 -->
 {#if pinned.length > 0}
-  <div class="pins" role="group" aria-label={m.webext_page_title()}>
+  <div
+    class="pins"
+    data-always-visible={alwaysVisible || undefined}
+    role="group"
+    aria-label={m.webext_page_title()}
+  >
     {#each pinned as action (action.runtime.install_id)}
       {@const name = action.label || webext.byInstall(action.runtime.install_id)?.name || ""}
       <button
@@ -76,7 +83,8 @@
     transition: opacity var(--motion-slow) var(--ease-smooth);
   }
 
-  .pins:focus-within {
+  .pins:focus-within,
+  .pins[data-always-visible] {
     opacity: 1;
   }
 

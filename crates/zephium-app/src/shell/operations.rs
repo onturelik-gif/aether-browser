@@ -1094,28 +1094,8 @@ impl Shell {
             if let Some(win) = self.windows.focused_mut() {
                 if win.mode == zephium_core::layout::Mode::TopBar {
                     let win_id = win.id;
-                    let hidden = win.metrics.sidebar_hidden;
                     if arg == "off" {
-                        if hidden {
-                            if win.metrics.caption != 0.0 {
-                                win.metrics.caption = 0.0;
-                                let _ = self.relayout_with(false);
-                                self.refresh_sidebar_peek();
-                            }
-                        } else {
-                            let _ = self.engine.raise_chrome(
-                                win_id,
-                                false,
-                                Rect::new(0.0, 0.0, 1.0, 1.0),
-                                false,
-                            );
-                        }
-                    } else if hidden {
-                        if (win.metrics.caption - 280.0).abs() > 0.5 {
-                            win.metrics.caption = 280.0;
-                            let _ = self.relayout_with(false);
-                            self.refresh_sidebar_peek();
-                        }
+                        let _ = self.engine.set_chrome_popover(win_id, None);
                     } else {
                         let nums: Vec<f64> = arg
                             .split(',')
@@ -1128,11 +1108,27 @@ impl Shell {
                                 nums[2].max(16.0),
                                 nums[3].max(16.0),
                             );
-                            let _ = self.engine.raise_chrome(win_id, true, rect, false);
+                            let _ = self.engine.set_chrome_popover(win_id, Some(rect));
                         }
                     }
                 }
             }
+            return operation_result(OperationOutcome::Applied, OperationReason::MutationApplied);
+        }
+        if id == "glance.close" {
+            self.close_glance();
+            return operation_result(OperationOutcome::Applied, OperationReason::MutationApplied);
+        }
+        if id == "glance.expand" {
+            self.expand_glance();
+            return operation_result(OperationOutcome::Applied, OperationReason::MutationApplied);
+        }
+        if id == "glance.split" {
+            self.split_glance();
+            return operation_result(OperationOutcome::Applied, OperationReason::MutationApplied);
+        }
+        if let Some(mode) = id.strip_prefix("glance.mod=") {
+            self.engine.set_glance_mod(mode);
             return operation_result(OperationOutcome::Applied, OperationReason::MutationApplied);
         }
         if let Some(url) = id

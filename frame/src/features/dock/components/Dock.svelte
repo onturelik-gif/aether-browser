@@ -1,5 +1,12 @@
 <script lang="ts">
   import type { Snippet } from "svelte";
+  import { Download04Icon, PuzzleIcon } from "@hugeicons/core-free-icons";
+  import { tabs } from "$domain/tabs";
+  import { surface } from "$domain/surface";
+  import Disclosure from "$shared/ui/Disclosure";
+  import Icon from "$shared/ui/Icon";
+  import DownloadsPopover from "$features/downloads/components/DownloadsPopover.svelte";
+  import { ExtensionsSection } from "$features/extensions";
   import ToolShelf from "./ToolShelf.svelte";
 
   let {
@@ -38,18 +45,56 @@
   style:--cascade={8}
 >
   {#if above}<div class="dock-above" data-under-panel>{@render above()}</div>{/if}
-  <!-- In the row the profile leads; down the rail it closes the column. -->
-  <div class="dock-base">
-    {#if tools && !compact}<div class="dock-profile-col"><ToolShelf /></div>{/if}
-    {#if sites}<div class="dock-sites-slot">
-        {@render sites()}
-      </div>{/if}
-    {#if tools && compact}<span class="dock-rule" aria-hidden="true"></span><ToolShelf
-        compact
-        {roomy}
-      />{/if}
-    {#if foot}<span class="dock-rule" aria-hidden="true"></span>{@render foot()}{/if}
-  </div>
+  <!-- In the row the profile leads, followed by Extensions & Downloads in an even 3-column grid. -->
+  {#if !compact && tools}
+    <div class="dock-base dock-base-grid">
+      <div class="dock-grid-tile dock-profile-col"><ToolShelf /></div>
+      <div class="dock-grid-tile">
+        <Disclosure
+          label="Eklentiler"
+          triggerTitle="Eklentiler"
+          triggerClass="dock-util-btn"
+          panelClass="dock-up-panel utilities-panel sidebar-softens"
+          align="start"
+        >
+          {#snippet trigger()}
+            <Icon icon={PuzzleIcon} size={17} strokeWidth={1.75} />
+          {/snippet}
+          <div class="dock-ext-wrap">
+            <ExtensionsSection />
+          </div>
+        </Disclosure>
+      </div>
+      <div class="dock-grid-tile">
+        <Disclosure
+          label="İndirilenler"
+          triggerTitle="İndirilenler"
+          triggerClass="dock-util-btn"
+          panelClass="dock-up-panel dock-dl-panel sidebar-softens"
+          align="end"
+        >
+          {#snippet trigger()}
+            <Icon icon={Download04Icon} size={17} strokeWidth={1.75} />
+          {/snippet}
+          <DownloadsPopover
+            profile={tabs.profile()?.id ?? ""}
+            onShowAll={() => void surface.open("downloads")}
+          />
+        </Disclosure>
+      </div>
+    </div>
+  {:else}
+    <div class="dock-base">
+      {#if sites}<div class="dock-sites-slot">
+          {@render sites()}
+        </div>{/if}
+      {#if tools && compact}<span class="dock-rule" aria-hidden="true"></span><ToolShelf
+          compact
+          {roomy}
+        />{/if}
+      {#if foot}<span class="dock-rule" aria-hidden="true"></span>{@render foot()}{/if}
+    </div>
+  {/if}
 </footer>
 
 <style>
@@ -76,6 +121,72 @@
     display: flex;
     align-items: center;
     gap: var(--dock-shelf-gap);
+  }
+
+  .dock-base-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: var(--dock-gap, 6px);
+    width: 100%;
+  }
+
+  .dock-grid-tile {
+    min-width: 0;
+    height: var(--dock-tile, 40px);
+  }
+
+  .dock-grid-tile :global(.shelf),
+  .dock-grid-tile :global(.ui-disclosure) {
+    width: 100%;
+    height: 100%;
+  }
+
+  .dock-grid-tile :global(.case),
+  .dock-grid-tile :global(.dock-util-btn) {
+    position: relative;
+    display: grid;
+    place-items: center;
+    width: 100%;
+    height: 100%;
+    margin-inline: 0;
+    padding: 0;
+    border: 0;
+    border-radius: 11px;
+    background: var(--row-active, rgba(255, 255, 255, 0.08));
+    box-shadow: var(--shine-top);
+    color: var(--color-label-secondary);
+    cursor: default;
+    transition:
+      background-color var(--motion-fast) var(--ease-out),
+      color var(--motion-fast) var(--ease-out),
+      scale var(--motion-slow) var(--ease-spring);
+  }
+
+  .dock-grid-tile :global(.dock-util-btn:hover),
+  .dock-grid-tile :global(.dock-util-btn[data-state="open"]) {
+    background: var(--row-pressed, rgba(255, 255, 255, 0.14));
+    color: var(--color-text);
+  }
+
+  .dock-grid-tile :global(.dock-util-btn:active) {
+    scale: 0.94;
+  }
+
+  .dock-grid-tile :global(.dock-up-panel) {
+    top: auto !important;
+    bottom: calc(100% + 8px) !important;
+    transform-origin: bottom center;
+  }
+
+  .dock-grid-tile :global(.dock-dl-panel) {
+    inset-inline-end: 0;
+    min-width: 240px;
+    max-width: calc(var(--sidebar-width, 280px) - 12px);
+  }
+
+  .dock-ext-wrap {
+    min-width: 210px;
+    padding: 2px 0;
   }
 
   /* Ours on one side of the rule, the web's on the other. */

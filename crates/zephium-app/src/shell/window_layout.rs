@@ -91,7 +91,13 @@ impl Shell {
         let browser_page_active = self.active_browser_page().is_some();
         // A window-filling fullscreen page stands alone; the split it belongs
         // to is untouched and returns with the next layout after it.
+        let active_glance = (!browser_page_active && filling.is_none())
+            .then(|| self.glance.as_ref().map(|(id, _, _)| *id))
+            .flatten()
+            .filter(|id| self.items.tab(*id).is_some());
         let tree = if let Some(id) = filling {
+            Some(Pane::Leaf(id))
+        } else if let Some(id) = active_glance {
             Some(Pane::Leaf(id))
         } else if browser_page_active {
             self.work_pane_tree()
@@ -137,6 +143,17 @@ impl Shell {
         }
         if filling.is_some() {
             l.content = Some(Rect::new(0.0, 0.0, win.size.width, win.size.height));
+        } else if active_glance.is_some() {
+            if let Some(c) = l.content {
+                let header_h = 46.0;
+                let pad_x = (c.width * 0.075).clamp(24.0, 120.0);
+                let pad_b = (c.height * 0.055).clamp(18.0, 52.0);
+                let w = (c.width - pad_x * 2.0).max(320.0);
+                let h = (c.height - header_h - pad_b - 16.0).max(240.0);
+                let x = c.x + (c.width - w) * 0.5;
+                let y = c.y + header_h + 10.0;
+                l.content = Some(Rect::new(x, y, w, h));
+            }
         }
         // Raw native children still receive their final geometry while a
         // first navigation is provisional, but macOS must not shrink the
@@ -145,6 +162,7 @@ impl Shell {
         // The content stage itself is transparent and presentation-gated, so
         // it can sit above this real UI without painting an artificial box.
         let chrome_present = !privileged_overlay_active
+            && active_glance.is_none()
             && self.window_visible
             && native_policy_available
             && tree.as_ref().is_some_and(|tree| {
