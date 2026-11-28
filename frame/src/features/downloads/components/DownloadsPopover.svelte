@@ -20,19 +20,64 @@
 
   let {
     profile,
+    open = false,
     onShowAll,
+    onStatusChange,
   }: {
     profile: string;
+    open?: boolean;
     onShowAll?: () => void;
+    onStatusChange?: (status: { active: boolean; unseenCompleted: boolean }) => void;
   } = $props();
 
   let session = $state.raw(untrack(() => new DownloadSession(profile)));
+  let unseenCompleted = $state(false);
+  let initialized = false;
+  let seenCompleted = new Set<string>();
+
   $effect(() => {
     if (!profile) return;
     const next = new DownloadSession(profile);
     session = next;
-    void next.start();
+    initialized = false;
+    seenCompleted = new Set();
+    unseenCompleted = false;
+    void next.start().then(() => {
+      if (session !== next) return;
+      for (const entry of next.entries) {
+        if (entry.state === "completed") seenCompleted.add(entry.id);
+      }
+      initialized = true;
+    });
     return () => next.stop();
+  });
+
+  let active = $derived(
+    session.entries.some((entry) => entry.state === "receiving" || entry.state === "pending"),
+  );
+
+  $effect(() => {
+    const entries = session.entries;
+    const isOpen = open;
+    untrack(() => {
+      if (!initialized) return;
+      for (const entry of entries) {
+        if (entry.state === "completed" && !seenCompleted.has(entry.id)) {
+          seenCompleted.add(entry.id);
+          if (!isOpen) unseenCompleted = true;
+        }
+      }
+    });
+  });
+
+  $effect(() => {
+    if (!open) return;
+    unseenCompleted = false;
+    void untrack(() => session.refresh());
+  });
+
+  $effect(() => {
+    onStatusChange?.({ active, unseenCompleted });
   });
 
   let recent = $derived(

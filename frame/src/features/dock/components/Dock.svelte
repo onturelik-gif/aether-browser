@@ -28,6 +28,10 @@
     /** What closes the rail at its very foot, below the kept sites. */
     foot?: Snippet;
   } = $props();
+
+  let dlOpen = $state(false);
+  let dlActive = $state(false);
+  let dlUnseenCompleted = $state(false);
 </script>
 
 <!--
@@ -72,12 +76,31 @@
           triggerClass="dock-util-btn"
           panelClass="dock-up-panel dock-dl-panel sidebar-softens"
           align="end"
+          onopen={() => {
+            dlOpen = true;
+            dlUnseenCompleted = false;
+          }}
+          onclose={() => {
+            dlOpen = false;
+          }}
         >
           {#snippet trigger()}
-            <Icon icon={Download04Icon} size={17} strokeWidth={1.75} />
+            <span class="dock-dl-trigger">
+              <Icon icon={Download04Icon} size={17} strokeWidth={1.75} />
+              {#if dlActive}
+                <span class="dock-dl-dot dock-dl-dot-active" aria-hidden="true"></span>
+              {:else if dlUnseenCompleted}
+                <span class="dock-dl-dot dock-dl-dot-done" aria-hidden="true"></span>
+              {/if}
+            </span>
           {/snippet}
           <DownloadsPopover
             profile={tabs.profile()?.id ?? ""}
+            open={dlOpen}
+            onStatusChange={(s) => {
+              dlActive = s.active;
+              dlUnseenCompleted = s.unseenCompleted;
+            }}
             onShowAll={() => void surface.open("downloads")}
           />
         </Disclosure>
@@ -199,6 +222,51 @@
     width: 100%;
     min-width: 0;
     padding: 2px 0;
+  }
+
+  .dock-dl-trigger {
+    position: relative;
+    display: inline-grid;
+    place-items: center;
+  }
+
+  .dock-dl-dot {
+    position: absolute;
+    top: -3px;
+    right: -3px;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: #38bdf8;
+    box-shadow: 0 0 0 1.5px var(--color-tile, #23262e);
+    pointer-events: none;
+  }
+
+  .dock-dl-dot-active {
+    animation: dock-dl-pulse 1.3s ease-in-out infinite;
+  }
+
+  .dock-dl-dot-done {
+    background: #38bdf8;
+    box-shadow:
+      0 0 0 1.5px var(--color-tile, #23262e),
+      0 0 6px rgba(56, 189, 248, 0.75);
+  }
+
+  @keyframes dock-dl-pulse {
+    0%,
+    100% {
+      transform: scale(1);
+      box-shadow:
+        0 0 0 1.5px var(--color-tile, #23262e),
+        0 0 0 0 rgba(56, 189, 248, 0.65);
+    }
+    50% {
+      transform: scale(1.12);
+      box-shadow:
+        0 0 0 1.5px var(--color-tile, #23262e),
+        0 0 0 4px rgba(56, 189, 248, 0);
+    }
   }
 
   /* Ours on one side of the rule, the web's on the other. */

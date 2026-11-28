@@ -384,6 +384,9 @@
   let pageRequest = $derived(tabs.activeTab()?.page_request ?? null);
   let pageRequestSerial = $derived(tabs.activeTab()?.page_request_serial ?? 0);
 
+  let isTopBar = $derived(preferences.value("sidebar.mode") === "top");
+  let topbarRequestEl = $state<HTMLDivElement | null>(null);
+
   // What appears only on demand is fetched the first time it is wanted, not
   // at startup; a failed fetch is tried again at the next request.
   let RequestCard = $state.raw<typeof import("./PageRequestCard.svelte").default | null>(null);
@@ -393,6 +396,29 @@
         (module) => (RequestCard = module.default),
         () => {},
       );
+  });
+
+  $effect(() => {
+    if (!isTopBar || compact || !pageRequest || !RequestCard || !topbarRequestEl) return;
+    const el = topbarRequestEl;
+    const syncPopover = () => {
+      const rect = el.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) return;
+      const x = Math.floor(rect.left);
+      const y = Math.floor(rect.top);
+      const w = Math.ceil(rect.width);
+      const h = Math.ceil(rect.height);
+      void commands.runCommand(`topbar.popover=${x},${y},${w},${h}`).catch(() => {});
+    };
+    syncPopover();
+    const ro = new ResizeObserver(syncPopover);
+    ro.observe(el);
+    window.addEventListener("resize", syncPopover);
+    return () => {
+      ro.disconnect();
+      window.removeEventListener("resize", syncPopover);
+      void commands.runCommand("topbar.popover=off").catch(() => {});
+    };
   });
 </script>
 
@@ -603,12 +629,20 @@
     <p class="popup-notice" role="status" title={m.page_request_waiting()}>
       <Icon icon={Alert02Icon} size={14} />
     </p>
-  {:else if pageRequest && RequestCard}
+  {:else if !isTopBar && pageRequest && RequestCard}
     {#key `${tabs.activeId()}:${pageRequestSerial}:${JSON.stringify(pageRequest)}`}
       <RequestCard tab={tabs.activeId()!} serial={pageRequestSerial} request={pageRequest} />
     {/key}
   {/if}
 </form>
+
+{#if isTopBar && !compact && pageRequest && RequestCard}
+  <div class="topbar-request-float" bind:this={topbarRequestEl}>
+    {#key `${tabs.activeId()}:${pageRequestSerial}:${JSON.stringify(pageRequest)}`}
+      <RequestCard tab={tabs.activeId()!} serial={pageRequestSerial} request={pageRequest} />
+    {/key}
+  </div>
+{/if}
 
 {#if addrMenu}
   <div
@@ -705,6 +739,25 @@
     height: 1px;
     margin: 3px 6px;
     background: rgba(255, 255, 255, 0.08);
+  }
+
+  .topbar-request-float {
+    position: fixed;
+    top: 112px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: min(500px, calc(100vw - 32px));
+    z-index: 80;
+    background: var(--color-float, #23262e);
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    border-radius: 14px;
+    box-shadow: 0 14px 36px rgba(0, 0, 0, 0.5);
+    padding: 4px;
+  }
+
+  .topbar-request-float :global(.page-request) {
+    margin-block-start: 0;
+    background: transparent;
   }
 
   .store-remove {

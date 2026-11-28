@@ -139,3 +139,19 @@
     />
   </RenderBoundary>
 </div>
+
+<style>
+  .mini-root {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    box-sizing: border-box;
+    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.12);
+    background: #14151c;
+  }
+
+  :global(html[data-theme="light"]) .mini-root {
+    box-shadow: inset 0 0 0 1px rgba(15, 23, 42, 0.14);
+    background: #f1f5f9;
+  }
+</style>

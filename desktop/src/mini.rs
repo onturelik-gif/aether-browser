@@ -12,6 +12,7 @@
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::{Duration, Instant};
 use tauri::{Manager, State, WebviewWindow};
 use zephium_app::{
     ChromePresentation, ChromePresentationCallback, ChromePresentationDispatch, Command, Handle,
@@ -34,9 +35,21 @@ const CASCADE: f64 = 28.0;
 /// Each open window's latest view, which its space menu is built from, and
 /// whether it was last put above other windows.
 static VIEWS: Mutex<Option<HashMap<u64, (MiniView, bool)>>> = Mutex::new(None);
+/// When each mini window was shown via `mini_ready`, used for the startup
+/// focus grace period before auto-dismissing Glance on outside click.
+static SHOWN_AT: Mutex<Option<HashMap<u64, Instant>>> = Mutex::new(None);
+/// Grace period after showing a Glance window before focus loss to the main
+/// window auto-closes it.
+const FOCUS_DISMISS_GRACE: Duration = Duration::from_millis(350);
 
 fn views() -> MutexGuard<'static, Option<HashMap<u64, (MiniView, bool)>>> {
     VIEWS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn shown_at() -> MutexGuard<'static, Option<HashMap<u64, Instant>>> {
+    SHOWN_AT
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
@@ -340,7 +353,7 @@ fn build(app: &tauri::AppHandle, opened: MiniOpenedView) -> bool {
     let min = zephium_app::MINI_WINDOW_MIN_SIZE;
     let builder =
         tauri::WebviewWindowBuilder::new(app, &label, tauri::WebviewUrl::External(bootstrap))
-            .title("Aether")
+            .title("Aether Glance")
             .incognito(true)
             .devtools(cfg!(debug_assertions))
             .general_autofill_enabled(false)
@@ -354,6 +367,7 @@ fn build(app: &tauri::AppHandle, opened: MiniOpenedView) -> bool {
             .min_inner_size(min.width, min.height)
             .maximizable(false)
             .fullscreen(false)
+            .skip_taskbar(true)
             .visible(false);
     #[cfg(target_os = "macos")]
     let builder = builder
@@ -418,10 +432,46 @@ fn build(app: &tauri::AppHandle, opened: MiniOpenedView) -> bool {
                     action: MiniAction::Close,
                 });
             }
-            // Moving to this window puts the launcher away.
-            tauri::WindowEvent::Focused(_) => {
+            // Moving to this window puts the launcher away. Clicking back onto
+            // the main browser window dismisses Glance, just like Zen Glance.
+            tauri::WindowEvent::Focused(focused) => {
                 if let Some(panel) = app.try_state::<crate::overlay::Overlay>() {
                     panel.focus_changed();
+                }
+                if !focused && !shutdown_started(app) {
+                    let past_grace = shown_at()
+                        .as_ref()
+                        .and_then(|map| map.get(&id))
+                        .is_some_and(|at| at.elapsed() >= FOCUS_DISMISS_GRACE);
+                    if past_grace {
+                        let app_handle = app.clone();
+                        let glance_label = self::label(id);
+                        std::thread::spawn(move || {
+                            // Brief settle so focus moving to a child WebView2
+                            // inside Glance never triggers a false dismiss.
+                            std::thread::sleep(Duration::from_millis(55));
+                            let check_handle = app_handle.clone();
+                            let _ = app_handle.run_on_main_thread(move || {
+                                if shutdown_started(&check_handle) {
+                                    return;
+                                }
+                                let still_focused = check_handle
+                                    .get_webview_window(&glance_label)
+                                    .is_some_and(|w| w.is_focused().unwrap_or(false));
+                                let main_focused = check_handle
+                                    .get_webview_window("main")
+                                    .is_some_and(|m| m.is_focused().unwrap_or(false));
+                                if !still_focused && main_focused {
+                                    if let Some(shell) = check_handle.try_state::<Handle>() {
+                                        let _ = shell.dispatch(Command::Mini {
+                                            window: id,
+                                            action: MiniAction::Close,
+                                        });
+                                    }
+                                }
+                            });
+                        });
+                    }
                 }
             }
             tauri::WindowEvent::Resized(_) | tauri::WindowEvent::ScaleFactorChanged { .. } => {
@@ -550,6 +600,9 @@ pub(crate) fn recover(app: &tauri::AppHandle, toolbar: &str) {
 pub(crate) fn close(app: &tauri::AppHandle, closed: MiniClosedView) {
     if let Some(views) = views().as_mut() {
         views.remove(&closed.window);
+    }
+    if let Some(map) = shown_at().as_mut() {
+        map.remove(&closed.window);
     }
     if let Some(reloads) = RELOADS
         .lock()
@@ -699,6 +752,9 @@ pub(crate) fn mini_ready(caller: WebviewWindow, shell: State<'_, Handle>) -> boo
     };
     let _ = caller.show();
     let _ = caller.set_focus();
+    shown_at()
+        .get_or_insert_with(Default::default)
+        .insert(window, Instant::now());
     shell.dispatch(Command::MiniAttached { window, size })
 }
 

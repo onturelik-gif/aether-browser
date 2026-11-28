@@ -264,6 +264,8 @@
   let pointerIn = $state(false);
   let extOpen = $state(false);
   let dlOpen = $state(false);
+  let dlActive = $state(false);
+  let dlUnseenCompleted = $state(false);
   let utilityOpen = $state(false);
   let profileOpen = $state(false);
 
@@ -848,6 +850,7 @@
         align="end"
         onopen={() => {
           dlOpen = true;
+          dlUnseenCompleted = false;
           clearTimeout(linger);
         }}
         onclose={() => {
@@ -855,10 +858,22 @@
         }}
       >
         {#snippet trigger()}
-          <Icon icon={Download04Icon} size={15} />
+          <span class="topbar-dl-trigger">
+            <Icon icon={Download04Icon} size={15} />
+            {#if dlActive}
+              <span class="topbar-dl-dot topbar-dl-dot-active" aria-hidden="true"></span>
+            {:else if dlUnseenCompleted}
+              <span class="topbar-dl-dot topbar-dl-dot-done" aria-hidden="true"></span>
+            {/if}
+          </span>
         {/snippet}
         <DownloadsPopover
           profile={tabs.profile()?.id ?? ""}
+          open={dlOpen}
+          onStatusChange={(s) => {
+            dlActive = s.active;
+            dlUnseenCompleted = s.unseenCompleted;
+          }}
           onShowAll={() => void surface.open("downloads")}
         />
       </Disclosure>
@@ -1369,6 +1384,51 @@
   :global(.aether-topbar .topbar-dl-panel) {
     width: 320px;
     max-width: calc(100vw - 24px);
+  }
+
+  .topbar-dl-trigger {
+    position: relative;
+    display: inline-grid;
+    place-items: center;
+  }
+
+  .topbar-dl-dot {
+    position: absolute;
+    top: -3px;
+    right: -3px;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: #38bdf8;
+    box-shadow: 0 0 0 1.5px var(--color-surface, #1c1f26);
+    pointer-events: none;
+  }
+
+  .topbar-dl-dot-active {
+    animation: topbar-dl-pulse 1.3s ease-in-out infinite;
+  }
+
+  .topbar-dl-dot-done {
+    background: #38bdf8;
+    box-shadow:
+      0 0 0 1.5px var(--color-surface, #1c1f26),
+      0 0 6px rgba(56, 189, 248, 0.75);
+  }
+
+  @keyframes topbar-dl-pulse {
+    0%,
+    100% {
+      transform: scale(1);
+      box-shadow:
+        0 0 0 1.5px var(--color-surface, #1c1f26),
+        0 0 0 0 rgba(56, 189, 248, 0.65);
+    }
+    50% {
+      transform: scale(1.12);
+      box-shadow:
+        0 0 0 1.5px var(--color-surface, #1c1f26),
+        0 0 0 4px rgba(56, 189, 248, 0);
+    }
   }
 
   .topbar-address {

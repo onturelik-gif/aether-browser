@@ -143,7 +143,23 @@ fn operation_uri(operation: &ICoreWebView2DownloadOperation) -> Option<String> {
     }
     take_string(text, zephium_core::navigation::MAX_URL_BYTES)
 }
-fn current_origin(controller: &ICoreWebView2Controller) -> Option<PageOrigin> {
+fn extension_origin(url: &url::Url) -> Option<String> {
+    let id = zephium_core::navigation::extension_document_id(url)?;
+    Some(format!("chrome-extension://{id}"))
+}
+enum DownloadSource {
+    Web(PageOrigin),
+    Extension(String),
+}
+impl DownloadSource {
+    fn label(&self) -> String {
+        match self {
+            Self::Web(origin) => origin.as_str().into(),
+            Self::Extension(origin) => origin.clone(),
+        }
+    }
+}
+fn current_source(controller: &ICoreWebView2Controller) -> Option<DownloadSource> {
     let core = unsafe { controller.CoreWebView2() }.ok()?;
     let mut value = PWSTR::null();
     unsafe { core.Source(&mut value) }.ok()?;
@@ -152,19 +168,36 @@ fn current_origin(controller: &ICoreWebView2Controller) -> Option<PageOrigin> {
         zephium_core::navigation::MAX_URL_BYTES,
     )?)
     .ok()?;
-    PageOrigin::from_url(&url).ok()
+    if let Ok(origin) = PageOrigin::from_url(&url) {
+        return Some(DownloadSource::Web(origin));
+    }
+    extension_origin(&url).map(DownloadSource::Extension)
 }
-fn source_origin(uri: &str, controller: &ICoreWebView2Controller) -> Option<PageOrigin> {
+fn source_origin(uri: &str, controller: &ICoreWebView2Controller) -> Option<DownloadSource> {
     if zephium_core::navigation::is_allowed_str(uri) {
-        return PageOrigin::from_url(&url::Url::parse(uri).ok()?).ok();
+        return PageOrigin::from_url(&url::Url::parse(uri).ok()?)
+            .ok()
+            .map(DownloadSource::Web);
+    }
+    if let Ok(url) = url::Url::parse(uri) {
+        if let Some(ext) = extension_origin(&url) {
+            return Some(DownloadSource::Extension(ext));
+        }
     }
     if let Some(blob) = uri.strip_prefix("blob:") {
         if zephium_core::navigation::is_allowed_str(blob) {
-            return PageOrigin::from_url(&url::Url::parse(blob).ok()?).ok();
+            return PageOrigin::from_url(&url::Url::parse(blob).ok()?)
+                .ok()
+                .map(DownloadSource::Web);
+        }
+        if let Ok(url) = url::Url::parse(blob) {
+            if let Some(ext) = extension_origin(&url) {
+                return Some(DownloadSource::Extension(ext));
+            }
         }
     }
     if uri.starts_with("data:") {
-        return current_origin(controller);
+        return current_source(controller);
     }
     None
 }
@@ -402,6 +435,11 @@ impl Downloads {
         // Only a download the person started from the browser's own menu
         // comes without a site to ask; it asks where to save instead.
         let (controller, args, ask) = request;
+        // Always suppress WebView2's built-in Edge download flyout; Aether
+        // owns the download UI for both admitted and refused downloads.
+        unsafe {
+            let _ = args.SetHandled(true);
+        }
         let ask_destination = ask.is_none();
         let initial_open = initial.is_some();
         if self.stopping.get()
@@ -461,10 +499,16 @@ impl Downloads {
         };
         // DownloadStarting says neither who clicked nor which frame asked, so
         // the site's own decision is what guards a download nobody started.
-        let site = match self.site_admission(partition.profile(), ask, &origin, true) {
-            super::site::SiteAdmission::Refuse => return,
-            super::site::SiteAdmission::Open => None,
-            super::site::SiteAdmission::Hold(hold) => Some(hold),
+        // Extension pages bypass site-download prompts and record their origin.
+        let site = match &origin {
+            DownloadSource::Web(web_origin) => {
+                match self.site_admission(partition.profile(), ask, web_origin, true) {
+                    super::site::SiteAdmission::Refuse => return,
+                    super::site::SiteAdmission::Open => None,
+                    super::site::SiteAdmission::Hold(hold) => Some(hold),
+                }
+            }
+            DownloadSource::Extension(_) => None,
         };
         let insecure = url::Url::parse(&uri).is_ok_and(|url| is_insecure_source(&url));
         let Ok(core) = (unsafe { controller.CoreWebView2() }) else {
@@ -488,12 +532,14 @@ impl Downloads {
                 unsafe {
                     event
                         .SetResultFilePath(PCWSTR(path.as_ptr()))
+                        .and_then(|_| event.SetHandled(true))
                         .and_then(|_| event.SetCancel(false))
                 }
                 .is_ok()
             });
             if !accepted {
                 unsafe {
+                    let _ = event.SetHandled(true);
                     let _ = event.SetCancel(true);
                 }
             }
@@ -580,7 +626,7 @@ impl Downloads {
                 .duration_since(UNIX_EPOCH)
                 .map_or(0, |time| time.as_secs() as i64),
             filename,
-            source: origin.as_str().into(),
+            source: origin.label(),
             source_is_context: uri == "data:",
             state: DownloadState::Pending,
             received: 0,

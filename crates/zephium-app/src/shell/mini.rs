@@ -581,7 +581,8 @@ impl Shell {
 
     /// Ends a mini window and the page in it.
     pub(super) fn close_mini(&mut self, window: WindowId) -> OperationDisposition {
-        if self.glance.is_some_and(|(w, _)| w == window) {
+        let was_glance = self.glance.is_some_and(|(w, _)| w == window);
+        if was_glance {
             self.glance = None;
         }
         let Some(mini) = self.mini.windows.remove(&window) else {
@@ -600,7 +601,7 @@ impl Shell {
         let _ = self.engine.release_window(window);
         (self.emit)(Projection::MiniClosed(zephium_ipc::MiniClosedView {
             window,
-            reveal_main: false,
+            reveal_main: was_glance,
         }));
         mutation_result(native)
     }
