@@ -187,13 +187,15 @@
   color: var(--color-muted);
 }
 
-/* A tool's one header control: everything else it offers sits in this menu. */
-.tool-overflow {
+/* Header action controls: More menu and direct Close button. */
+.tool-overflow,
+.tool-close {
   display: grid;
   place-items: center;
   flex: none;
   width: 28px;
   height: 28px;
+  padding: 0;
   border: 0;
   border-radius: var(--radius-row);
   background: transparent;
@@ -205,15 +207,21 @@
     color var(--motion-instant) var(--ease-smooth);
 }
 
-.tool-overflow:focus-visible {
+.tool-overflow:focus-visible,
+.tool-close:focus-visible {
   outline: 2px solid var(--color-ring);
   outline-offset: -2px;
 }
 
 .tool-overflow:hover,
-.tool-overflow[data-state="open"] {
+.tool-overflow[data-state="open"],
+.tool-close:hover {
   background: var(--color-fill-hover);
   color: var(--color-text);
+}
+
+.tool-close:active {
+  background: var(--color-fill-pressed);
 }
 
 /* The tool's More menu: its own actions, then the page and closing. */

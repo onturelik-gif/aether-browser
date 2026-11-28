@@ -264,7 +264,7 @@
 
   .aether-free-cell {
     min-width: 0;
-    height: var(--dock-tile, 40px);
+    height: 40px;
     border-radius: 11px;
     transition: background-color 120ms ease, box-shadow 120ms ease;
   }

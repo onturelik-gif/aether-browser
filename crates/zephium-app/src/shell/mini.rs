@@ -228,6 +228,25 @@ impl Shell {
         Some((profile, mini.space))
     }
 
+    /// Opens a Glance floating popup window centered over the main window.
+    pub(super) fn open_glance_mini(
+        &mut self,
+        profile: ProfileId,
+        space: SpaceId,
+        url: String,
+    ) -> Option<WindowId> {
+        let size = self.windows.focused().map_or(
+            Size::new(980.0, 720.0),
+            |main| {
+                Size::new(
+                    (main.size.width * 0.80).clamp(640.0, 1280.0),
+                    (main.size.height * 0.82).clamp(460.0, 860.0),
+                )
+            },
+        );
+        self.open_mini_page_with(profile, space, MiniSeed::Navigate(url), Some(size), true)
+    }
+
     /// Makes the window and its page. An adopted view's page takes the
     /// adoption's own id. `None` means nothing opened; an adoption was
     /// answered.
@@ -236,6 +255,17 @@ impl Shell {
         profile: ProfileId,
         space: SpaceId,
         seed: MiniSeed,
+    ) -> Option<WindowId> {
+        self.open_mini_page_with(profile, space, seed, None, false)
+    }
+
+    fn open_mini_page_with(
+        &mut self,
+        profile: ProfileId,
+        space: SpaceId,
+        seed: MiniSeed,
+        custom_size: Option<Size>,
+        pinned: bool,
     ) -> Option<WindowId> {
         let refused = !self.bootstrapped
             || !self.engine.hosts_mini_windows()
@@ -257,7 +287,9 @@ impl Shell {
             }
             return None;
         }
-        let size = self.mini.size.unwrap_or(MINI_WINDOW_SIZE);
+        let size = custom_size
+            .or(self.mini.size)
+            .unwrap_or(MINI_WINDOW_SIZE);
         let window = self.windows.create_unfocused(
             zephium_core::windows::WindowKind::Mini,
             profile,
@@ -273,7 +305,7 @@ impl Shell {
                 space,
                 page,
                 attached: false,
-                pinned: false,
+                pinned,
                 focus_pending: std::cell::Cell::new(true),
             },
         );
@@ -474,6 +506,7 @@ impl Shell {
         match action {
             crate::MiniAction::Close => self.close_mini(window),
             crate::MiniAction::OpenInMain => self.open_mini_in_main(window, None),
+            crate::MiniAction::SplitInMain => self.open_mini_in_split(window),
             crate::MiniAction::OpenInSpace(space) => self.open_mini_in_main(window, Some(space)),
             // The desktop could not build the window: the page still opens,
             // as a tab, rather than being lost.
@@ -548,6 +581,9 @@ impl Shell {
 
     /// Ends a mini window and the page in it.
     pub(super) fn close_mini(&mut self, window: WindowId) -> OperationDisposition {
+        if self.glance.is_some_and(|(w, _)| w == window) {
+            self.glance = None;
+        }
         let Some(mini) = self.mini.windows.remove(&window) else {
             return operation_result(OperationOutcome::Rejected, OperationReason::InvalidScope);
         };
@@ -681,6 +717,9 @@ impl Shell {
         ) {
             return operation_result(OperationOutcome::Rejected, OperationReason::InvalidScope);
         }
+        if self.glance.is_some_and(|(w, _)| w == window) {
+            self.glance = None;
+        }
         self.mini.windows.remove(&window);
         self.windows.remove(window);
         // The page leaves the mini window's stage before the main window's
@@ -693,6 +732,126 @@ impl Shell {
             reveal_main: true,
         }));
         mutation_result(native)
+    }
+
+    /// Moves the mini window's live page into the main window in Split View
+    /// beside the active (or Glance parent) tab, without reloading, and closes
+    /// the mini window. Falls back to opening as a regular tab if splitting is
+    /// unavailable.
+    pub(super) fn open_mini_in_split(&mut self, window: WindowId) -> OperationDisposition {
+        let Some(mini) = self.mini.windows.get(&window) else {
+            return operation_result(OperationOutcome::Rejected, OperationReason::InvalidScope);
+        };
+        let id = mini.page;
+        let origin = mini.space;
+        let Some(profile) = self.items.tab(id).and_then(|_| self.profile_of_item(id)) else {
+            return self.close_mini(window);
+        };
+        if self.active_browser_page().is_some() && !self.browser_return_ready {
+            self.browser_after_return = Some(Box::new(Command::Mini {
+                window,
+                action: crate::MiniAction::SplitInMain,
+            }));
+            return self.operation_show_browser_page(None);
+        }
+        if self.private_shown() {
+            let _ = self.operation_leave_private();
+        }
+        if self
+            .windows
+            .focused()
+            .is_some_and(|main| main.profile != profile)
+        {
+            let _ = self.operation_switch_profile(profile);
+        }
+        if self
+            .windows
+            .focused()
+            .is_none_or(|main| main.profile != profile)
+        {
+            return operation_result(OperationOutcome::Rejected, OperationReason::InvalidScope);
+        }
+        let Some(space) = self
+            .windows
+            .focused()
+            .filter(|main| main.profile == profile)
+            .map(|main| main.space)
+            .or_else(|| {
+                self.spaces
+                    .get(origin)
+                    .filter(|space| space.profile == profile)
+                    .map(|_| origin)
+            })
+        else {
+            return operation_result(OperationOutcome::Rejected, OperationReason::InvalidScope);
+        };
+        if self
+            .windows
+            .focused()
+            .is_some_and(|main| main.space != space)
+        {
+            let _ = self.operation_space(crate::SpaceCommand::Switch(space));
+        }
+        if self
+            .windows
+            .focused()
+            .is_none_or(|main| main.space != space)
+        {
+            return operation_result(OperationOutcome::Rejected, OperationReason::InvalidScope);
+        }
+        let glance_parent = self
+            .glance
+            .filter(|(w, _)| *w == window)
+            .map(|(_, parent)| parent);
+        if self.glance.is_some_and(|(w, _)| w == window) {
+            self.glance = None;
+        }
+        let partner = glance_parent
+            .filter(|parent| self.item_in_scope(*parent, profile, space))
+            .or_else(|| {
+                self.windows
+                    .focused()
+                    .and_then(|main| main.active)
+                    .filter(|active| self.item_in_scope(*active, profile, space))
+            });
+        let today = Placement::Space {
+            space,
+            section: SpaceSection::Today,
+        };
+        let before = partner
+            .and_then(|p| {
+                let roots = self.items.roots(today);
+                roots
+                    .iter()
+                    .position(|r| *r == p)
+                    .and_then(|at| roots.get(at + 1).copied())
+            })
+            .or_else(|| self.today_tabs(space).into_iter().next());
+        if !self.items.move_tab_to_root(id, today, before) {
+            return operation_result(OperationOutcome::Rejected, OperationReason::InvalidScope);
+        }
+        self.mini.windows.remove(&window);
+        self.windows.remove(window);
+        let _ = self.engine.release_window(window);
+        let disposition = if let Some(partner_id) = partner.filter(|p| *p != id) {
+            let fx = self.focus_tab(partner_id);
+            let _ = self.commit(fx);
+            let split = self.operation_split(id, Axis::Row);
+            if split.outcome == OperationOutcome::Applied {
+                split
+            } else {
+                let fx = self.focus_tab(id);
+                mutation_result(self.commit(fx))
+            }
+        } else {
+            let fx = self.focus_tab(id);
+            mutation_result(self.commit(fx))
+        };
+        (self.emit)(Projection::MiniClosed(zephium_ipc::MiniClosedView {
+            window,
+            reveal_main: true,
+        }));
+        disposition
     }
 
     /// Closes mini windows whose page went away underneath them, as a

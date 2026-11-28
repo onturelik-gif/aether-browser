@@ -82,6 +82,7 @@ fn routed(id: &str) -> Option<Routed> {
         "nav.back" => Routed::Act(MiniAction::Back),
         "nav.forward" => Routed::Act(MiniAction::Forward),
         "mini.openInMain" => Routed::Act(MiniAction::OpenInMain),
+        "mini.splitInMain" => Routed::Act(MiniAction::SplitInMain),
         "mini.keepOnTop" => Routed::Act(MiniAction::KeepOnTop(None)),
         "url.focus" => Routed::EditAddress,
         _ => return None,
@@ -339,7 +340,7 @@ fn build(app: &tauri::AppHandle, opened: MiniOpenedView) -> bool {
     let min = zephium_app::MINI_WINDOW_MIN_SIZE;
     let builder =
         tauri::WebviewWindowBuilder::new(app, &label, tauri::WebviewUrl::External(bootstrap))
-            .title("Zephium")
+            .title("Aether")
             .incognito(true)
             .devtools(cfg!(debug_assertions))
             .general_autofill_enabled(false)
@@ -446,10 +447,23 @@ fn build(app: &tauri::AppHandle, opened: MiniOpenedView) -> bool {
     true
 }
 
-/// Centres the first mini window on the screen the main window is on, and
-/// steps each further one down and across so none hides another.
+/// Centres the first mini window directly over the main browser window (falling
+/// back to screen centre), and steps each further one down and across so none
+/// hides another.
 fn place(app: &tauri::AppHandle, window: &WebviewWindow, id: u64) {
-    let _ = window.center();
+    let centered_on_main = app.get_webview_window("main").and_then(|main| {
+        let main_pos = main.outer_position().ok()?;
+        let main_size = main.outer_size().ok()?;
+        let win_size = window.outer_size().ok()?;
+        let x = main_pos.x + (main_size.width as i32 - win_size.width as i32) / 2;
+        let y = main_pos.y + (main_size.height as i32 - win_size.height as i32) / 2;
+        Some(tauri::PhysicalPosition::new(x, y))
+    });
+    if let Some(pos) = centered_on_main {
+        let _ = window.set_position(pos);
+    } else {
+        let _ = window.center();
+    }
     let others = labels(app)
         .iter()
         .filter(|other| window_of(other) != Some(id))
@@ -660,6 +674,7 @@ pub(crate) enum MiniIntent {
     Forward,
     Reload,
     OpenInMain,
+    SplitInMain,
     Close,
     /// Opens the launcher on the page's address.
     EditAddress,
@@ -705,6 +720,7 @@ pub(crate) fn mini_action(caller: WebviewWindow, action: MiniIntent) -> Operatio
         MiniIntent::Forward => MiniAction::Forward,
         MiniIntent::Reload => MiniAction::Reload,
         MiniIntent::OpenInMain => MiniAction::OpenInMain,
+        MiniIntent::SplitInMain => MiniAction::SplitInMain,
         MiniIntent::Close => MiniAction::Close,
         MiniIntent::KeepOnTop => MiniAction::KeepOnTop(None),
     };

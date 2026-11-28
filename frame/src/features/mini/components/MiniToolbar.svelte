@@ -3,6 +3,7 @@
     ArrowDown01Icon,
     ArrowLeft02Icon,
     ArrowRight02Icon,
+    ArrowUpRight01Icon,
     Cancel01Icon,
     MinusSignIcon,
     PinIcon,
@@ -78,6 +79,19 @@
   <span class="flex-1" aria-hidden="true"></span>
   <button
     type="button"
+    class="chrome-button"
+    disabled={!tab}
+    aria-label="Bölünmüş Görünümde Aç"
+    title="Bölünmüş Görünümde Aç"
+    onclick={() => onAction("split_in_main")}
+  >
+    <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <rect x="1.75" y="2.5" width="12.5" height="11" rx="2" stroke="currentColor" stroke-width="1.35" />
+      <line x1="8" y1="2.75" x2="8" y2="13.25" stroke="currentColor" stroke-width="1.35" />
+    </svg>
+  </button>
+  <button
+    type="button"
     class={["chrome-button", pinned && "chrome-button-active"]}
     aria-label={m.mini_keep_on_top()}
     title={m.mini_keep_on_top()}
@@ -96,7 +110,8 @@
       title={m.mini_open_in_main_hint()}
       onclick={() => onAction("open_in_main")}
     >
-      {m.mini_open_in_main()}
+      <span>{m.mini_open_in_main()}</span>
+      <Icon icon={ArrowUpRight01Icon} size={13} />
     </button>
     {#if tab && spaces > 1}
       <button
@@ -228,6 +243,7 @@
   }
 
   .mini-open {
+    gap: 4px;
     padding: 0 10px;
     font-weight: 500;
   }

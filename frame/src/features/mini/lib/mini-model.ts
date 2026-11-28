@@ -36,8 +36,11 @@ export function hostOf(url: string | null): string {
 type Keys = Pick<KeyboardEvent, "key" | "metaKey" | "ctrlKey" | "altKey" | "shiftKey">;
 
 /** The window's own keys while its toolbar holds focus, under the platform's
- *  command modifier: open in Zephium, address, close, reload. */
+ *  command modifier: open in Zephium, address, close, reload. Escape also closes. */
 export function miniShortcut(event: Keys, mac: boolean): MiniIntent | null {
+  if (event.key === "Escape" && !event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey) {
+    return "close";
+  }
   const command = mac ? event.metaKey && !event.ctrlKey : event.ctrlKey && !event.metaKey;
   if (!command || event.altKey || event.shiftKey) return null;
   switch (event.key.toLowerCase()) {

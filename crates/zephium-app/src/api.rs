@@ -270,6 +270,8 @@ pub enum MiniAction {
     Reload,
     /// Moves the page into the main window as a tab and closes the window.
     OpenInMain,
+    /// Moves the page into the main window in Split View beside the active tab and closes the window.
+    SplitInMain,
     /// The same, into the space the person picked.
     OpenInSpace(zephium_core::ids::SpaceId),
     Close,

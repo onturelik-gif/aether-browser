@@ -124,6 +124,7 @@
   }
 
   .dock-base-grid {
+    position: relative;
     display: grid;
     grid-template-columns: repeat(3, minmax(0, 1fr));
     gap: var(--dock-gap, 6px);
@@ -132,7 +133,7 @@
 
   .dock-grid-tile {
     min-width: 0;
-    height: var(--dock-tile, 40px);
+    height: 40px;
   }
 
   .dock-grid-tile :global(.shelf),
@@ -141,51 +142,62 @@
     height: 100%;
   }
 
+  .dock-grid-tile:not(.dock-profile-col) :global(.ui-disclosure) {
+    position: static;
+  }
+
+  .dock[data-compact="false"] .dock-base-grid .dock-grid-tile.dock-profile-col :global(.shelf .case),
   .dock-grid-tile :global(.case),
   .dock-grid-tile :global(.dock-util-btn) {
     position: relative;
     display: grid;
     place-items: center;
     width: 100%;
-    height: 100%;
+    height: 40px !important;
     margin-inline: 0;
     padding: 0;
     border: 0;
-    border-radius: 11px;
-    background: var(--row-active, rgba(255, 255, 255, 0.08));
-    box-shadow: var(--shine-top);
+    border-radius: 11px !important;
+    background: var(--color-tile) !important;
+    box-shadow: var(--shine), var(--shadow-tile) !important;
     color: var(--color-label-secondary);
     cursor: default;
     transition:
       background-color var(--motion-fast) var(--ease-out),
+      box-shadow var(--motion-fast) var(--ease-out),
       color var(--motion-fast) var(--ease-out),
       scale var(--motion-slow) var(--ease-spring);
   }
 
+  .dock[data-compact="false"] .dock-base-grid .dock-grid-tile.dock-profile-col :global(.shelf .case:hover),
+  .dock[data-compact="false"] .dock-base-grid .dock-grid-tile.dock-profile-col :global(.shelf .case[data-state="open"]),
+  .dock[data-compact="false"] .dock-base-grid .dock-grid-tile.dock-profile-col :global(.shelf .case.case-lit),
   .dock-grid-tile :global(.dock-util-btn:hover),
   .dock-grid-tile :global(.dock-util-btn[data-state="open"]) {
-    background: var(--row-pressed, rgba(255, 255, 255, 0.14));
+    background: var(--color-tile-hover) !important;
     color: var(--color-text);
   }
 
   .dock-grid-tile :global(.dock-util-btn:active) {
-    scale: 0.94;
+    scale: 0.95;
   }
 
   .dock-grid-tile :global(.dock-up-panel) {
+    left: 0 !important;
+    right: 0 !important;
+    inset-inline: 0 !important;
+    width: 100% !important;
+    min-width: 0 !important;
+    max-width: 100% !important;
+    box-sizing: border-box;
     top: auto !important;
     bottom: calc(100% + 8px) !important;
     transform-origin: bottom center;
   }
 
-  .dock-grid-tile :global(.dock-dl-panel) {
-    inset-inline-end: 0;
-    min-width: 240px;
-    max-width: calc(var(--sidebar-width, 280px) - 12px);
-  }
-
   .dock-ext-wrap {
-    min-width: 210px;
+    width: 100%;
+    min-width: 0;
     padding: 2px 0;
   }
 

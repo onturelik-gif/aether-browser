@@ -30,6 +30,7 @@
   import { duration } from "$shared/lib/motion";
   import { AddressField, SiteDetails, SiteHead } from "$features/address";
   import { BlockerShield } from "$features/blocker";
+  import ToolShelf from "$features/dock/components/ToolShelf.svelte";
   import DownloadsPopover from "$features/downloads/components/DownloadsPopover.svelte";
   import { ExtensionsSection, PinnedExtensions } from "$features/extensions";
   import { UtilityTray } from "$features/sidebar";
@@ -264,6 +265,7 @@
   let extOpen = $state(false);
   let dlOpen = $state(false);
   let utilityOpen = $state(false);
+  let profileOpen = $state(false);
 
   let chromeRaised = false;
   let peekGeneration = 0;
@@ -325,7 +327,8 @@
   }
 
   function needed(): boolean {
-    if (extOpen || dlOpen || utilityOpen || drag.ghost !== null || bmDrag?.active) return true;
+    if (extOpen || dlOpen || utilityOpen || profileOpen || drag.ghost !== null || bmDrag?.active)
+      return true;
     const active = document.activeElement;
     return (
       document.hasFocus() &&
@@ -384,7 +387,7 @@
   });
 
   $effect(() => {
-    const anyPopover = extOpen || dlOpen || utilityOpen;
+    const anyPopover = extOpen || dlOpen || utilityOpen || profileOpen;
     if (!anyPopover) {
       void commands.runCommand("topbar.popover=off").catch(() => {});
       if (away && peeking && !pointerIn && !atEdge && !overCard) untrack(() => release());
@@ -813,7 +816,9 @@
           <span>{updateBusy ? "Güncelleniyor…" : "Güncelle"}</span>
         </button>
       {/if}
-      <PinnedExtensions alwaysVisible />
+      <div class="topbar-pinned-wrap">
+        <PinnedExtensions alwaysVisible />
+      </div>
       <Disclosure
         label="Eklentiler"
         triggerTitle="Eklentiler"
@@ -839,7 +844,7 @@
         label="İndirilenler"
         triggerTitle="İndirilenler"
         triggerClass="topbar-icon-btn"
-        panelClass="topbar-floating-panel sidebar-softens"
+        panelClass="topbar-dl-panel topbar-floating-panel sidebar-softens"
         align="end"
         onopen={() => {
           dlOpen = true;
@@ -885,6 +890,19 @@
       >
         <Icon icon={Settings02Icon} size={16} />
       </button>
+      <ToolShelf
+        direction="down"
+        align="end"
+        triggerClass="topbar-icon-btn topbar-profile-btn"
+        panelClass="shelf-stack topbar-floating-panel sidebar-softens"
+        onopen={() => {
+          profileOpen = true;
+          clearTimeout(linger);
+        }}
+        onclose={() => {
+          profileOpen = false;
+        }}
+      />
     </div>
   </div>
 
@@ -1033,10 +1051,6 @@
   .topbar-ext-popup {
     min-width: 240px;
     padding: 4px 0;
-  }
-
-  :global(.topbar-icon-btn[data-pinned]) {
-    color: #38bdf8;
   }
 
   .topbar-update-pill {
@@ -1290,11 +1304,36 @@
   .topbar-nav-group {
     display: flex;
     align-items: center;
-    gap: 2px;
+    gap: 4px;
     flex: none;
   }
 
-  .topbar-icon-btn {
+  .topbar-pinned-wrap {
+    display: flex;
+    align-items: center;
+    flex: none;
+  }
+
+  :global(.aether-topbar .topbar-pinned-wrap:has(.pins)::after) {
+    content: "";
+    width: 1px;
+    height: 16px;
+    background: rgba(255, 255, 255, 0.14);
+    margin-inline: 3px;
+    flex: none;
+  }
+
+  :global(.aether-topbar .topbar-pinned-wrap .pins) {
+    gap: 4px;
+  }
+
+  :global(.aether-topbar .topbar-pinned-wrap .pin) {
+    inline-size: 30px;
+    block-size: 30px;
+    border-radius: 8px;
+  }
+
+  :global(.aether-topbar .topbar-icon-btn) {
     display: grid;
     place-items: center;
     width: 30px;
@@ -1302,19 +1341,34 @@
     padding: 0;
     border: 0;
     border-radius: 8px;
+    flex: none;
     background: transparent;
     color: var(--color-label-secondary);
     cursor: default;
     transition: background-color 120ms ease, color 120ms ease;
   }
 
-  .topbar-icon-btn:hover:not(:disabled) {
+  :global(.aether-topbar .topbar-icon-btn:hover:not(:disabled)),
+  :global(.aether-topbar .topbar-icon-btn[data-state="open"]) {
     background: var(--row-hover, rgba(255, 255, 255, 0.08));
     color: var(--color-text);
   }
 
-  .topbar-icon-btn:disabled {
+  :global(.aether-topbar .topbar-icon-btn:active:not(:disabled)) {
+    background: var(--row-pressed, rgba(255, 255, 255, 0.14));
+  }
+
+  :global(.aether-topbar .topbar-icon-btn:disabled) {
     opacity: 0.35;
+  }
+
+  :global(.aether-topbar .topbar-icon-btn[data-pinned]) {
+    color: #38bdf8;
+  }
+
+  :global(.aether-topbar .topbar-dl-panel) {
+    width: 320px;
+    max-width: calc(100vw - 24px);
   }
 
   .topbar-address {

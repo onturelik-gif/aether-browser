@@ -1151,7 +1151,7 @@ impl Shell {
             "window.newMini" => self.operation_open(),
             // Keys a mini window answers; the desktop hands them to the one
             // in front, and with none in front they do nothing.
-            "mini.openInMain" | "mini.keepOnTop" => {
+            "mini.openInMain" | "mini.splitInMain" | "mini.keepOnTop" => {
                 operation_result(OperationOutcome::NoOp, OperationReason::StateUnchanged)
             }
             "window.closePrivate" => self.operation_close_private(),

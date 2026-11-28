@@ -205,26 +205,6 @@
       });
   }
 
-  let glanceUrl = $state<string | null>(null);
-  function closeGlance() {
-    glanceUrl = null;
-    void commands.runCommand("glance.close").catch(() => {});
-  }
-  function expandGlance() {
-    glanceUrl = null;
-    void commands.runCommand("glance.expand").catch(() => {});
-  }
-  function splitGlance() {
-    glanceUrl = null;
-    void commands.runCommand("glance.split").catch(() => {});
-  }
-  function glanceHost(url: string): string {
-    try {
-      return new URL(url).host.replace(/^www\./, "") || url;
-    } catch {
-      return url;
-    }
-  }
   onMount(() => {
     try {
       const saved = localStorage.getItem("aether.glance.mod");
@@ -233,12 +213,6 @@
   });
 
   function escapeSplit(event: KeyboardEvent) {
-    if (glanceUrl !== null && event.key === "Escape" && !event.isComposing) {
-      event.preventDefault();
-      event.stopPropagation();
-      closeGlance();
-      return;
-    }
     if (
       (!splitting && pendingSplit === null) ||
       event.key !== "Escape" ||
@@ -392,12 +366,6 @@
       if (command.id.startsWith("tab.lineage=")) {
         const [parentId, childId] = command.id.slice("tab.lineage=".length).split(":");
         if (parentId && childId) recordTabLineage(parentId, childId);
-      }
-      if (command.id.startsWith("glance.open=")) {
-        glanceUrl = command.id.slice("glance.open=".length);
-      }
-      if (command.id === "glance.close") {
-        glanceUrl = null;
       }
       if (command.id === "split.choose") chooseSplit();
       if (command.id === "tab.copyLink") void tabs.copyMenuTargetLink().then(linkCopied);
@@ -676,49 +644,6 @@
   >
   {/if}
   <div class="stage-column">
-    {#if glanceUrl !== null}
-      <div
-        class="aether-glance-backdrop"
-        role="presentation"
-        onclick={closeGlance}
-      >
-        <div
-          class="aether-glance-bar"
-          role="toolbar"
-          aria-label="Glance Önizleme"
-          onclick={(e) => e.stopPropagation()}
-        >
-          <span class="aether-glance-host" title={glanceUrl}>{glanceHost(glanceUrl)}</span>
-          <div class="aether-glance-actions">
-            <button
-              type="button"
-              class="aether-glance-btn"
-              title="Bölünmüş Görünümde Aç"
-              onclick={splitGlance}
-            >
-              Bölünmüş Görünüm
-            </button>
-            <button
-              type="button"
-              class="aether-glance-btn aether-glance-btn-primary"
-              title="Sekmeye Genişlet"
-              onclick={expandGlance}
-            >
-              Sekmeye Genişlet ↗
-            </button>
-            <button
-              type="button"
-              class="aether-glance-btn aether-glance-btn-close"
-              title="Kapat (Esc)"
-              aria-label="Kapat"
-              onclick={closeGlance}
-            >
-              ✕
-            </button>
-          </div>
-        </div>
-      </div>
-    {/if}
     {#if browserPage.navigationFailed()}<div class="navigation-error" role="alert">
         {m.browser_nav_failed()}
       </div>{/if}
@@ -901,91 +826,6 @@
     flex-direction: column;
     min-width: 0;
     min-height: 0;
-  }
-
-  .aether-glance-backdrop {
-    position: absolute;
-    inset: 0;
-    z-index: 25;
-    display: flex;
-    justify-content: center;
-    align-items: flex-start;
-    padding-top: 8px;
-    background: rgba(8, 10, 16, 0.58);
-    backdrop-filter: blur(8px);
-    border-radius: 12px;
-  }
-
-  .aether-glance-bar {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 14px;
-    width: min(85%, 1240px);
-    height: 36px;
-    padding: 0 10px 0 14px;
-    border-radius: 999px;
-    background: rgba(24, 28, 38, 0.94);
-    border: 1px solid rgba(255, 255, 255, 0.14);
-    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.42);
-  }
-
-  .aether-glance-host {
-    font-size: 12.5px;
-    font-weight: 500;
-    color: var(--color-label-secondary);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .aether-glance-actions {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    flex: none;
-  }
-
-  .aether-glance-btn {
-    height: 26px;
-    padding: 0 10px;
-    border: 1px solid rgba(255, 255, 255, 0.12);
-    border-radius: 999px;
-    background: rgba(255, 255, 255, 0.06);
-    color: var(--color-text);
-    font-size: 11.5px;
-    font-weight: 500;
-    cursor: pointer;
-    transition: background-color 110ms ease, border-color 110ms ease;
-  }
-
-  .aether-glance-btn:hover {
-    background: rgba(255, 255, 255, 0.14);
-    border-color: rgba(255, 255, 255, 0.24);
-  }
-
-  .aether-glance-btn-primary {
-    background: rgba(56, 189, 248, 0.18);
-    border-color: rgba(56, 189, 248, 0.45);
-    color: #e0f2fe;
-  }
-
-  .aether-glance-btn-primary:hover {
-    background: rgba(56, 189, 248, 0.3);
-  }
-
-  .aether-glance-btn-close {
-    width: 26px;
-    padding: 0;
-    display: grid;
-    place-items: center;
-    background: rgba(239, 68, 68, 0.16);
-    border-color: rgba(239, 68, 68, 0.35);
-    color: #fecaca;
-  }
-
-  .aether-glance-btn-close:hover {
-    background: rgba(239, 68, 68, 0.32);
   }
 
   .stage-column > :global(main) {

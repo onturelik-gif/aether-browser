@@ -138,7 +138,15 @@
                 ><Icon icon={entry.icon} size={15} /></span
               >{/if}<span>{entry.label}</span></button
           >{/if}{/each}
-    </Disclosure>
+    </Disclosure><button
+      type="button"
+      class="tool-close"
+      title="Kapat"
+      aria-label="Kapat"
+      onclick={onclose}
+    >
+      <Icon icon={Cancel01Icon} size={15} strokeWidth={2} />
+    </button>
   </header>
   {#if (searchLabel && searchOpen) || filters}<div
       class="shared-tool-controls"

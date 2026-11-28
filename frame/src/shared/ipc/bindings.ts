@@ -1926,7 +1926,7 @@ export type MediaPlayerView = {
 export type MiniChanged = MiniView;
 
 /**  What a mini window's toolbar may ask of its page or its window. */
-export type MiniIntent = "back" | "forward" | "reload" | "open_in_main" | "close" |
+export type MiniIntent = "back" | "forward" | "reload" | "open_in_main" | "split_in_main" | "close" |
 /**  Opens the launcher on the page's address. */
 "edit_address" |
 /**  Keeps the window above other windows, or stops. */

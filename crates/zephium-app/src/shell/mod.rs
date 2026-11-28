@@ -258,8 +258,8 @@ pub struct Shell {
     recent_tabs: recent_tabs::RecentTabs,
     tab_previews: tab_previews::TabPreviews,
     mini: mini::MiniState,
-    /// Active Glance preview overlay: (glance_tab_id, parent_tab_id, url).
-    glance: Option<(ItemId, ItemId, String)>,
+    /// Active Glance floating popup: (mini_window_id, parent_tab_id).
+    glance: Option<(WindowId, ItemId)>,
     pending_size: Size,
     favicons: FaviconState,
     history: history::HistoryState,

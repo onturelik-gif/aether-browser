@@ -18,7 +18,25 @@
   import { acceleratorKeys } from "$shared/lib/accelerator";
   import { IS_MAC } from "$shared/platform";
 
-  let { compact = false, roomy = false }: { compact?: boolean; roomy?: boolean } = $props();
+  let {
+    compact = false,
+    roomy = false,
+    direction = "up",
+    align = "start",
+    triggerClass,
+    panelClass,
+    onopen,
+    onclose,
+  }: {
+    compact?: boolean;
+    roomy?: boolean;
+    direction?: "up" | "down";
+    align?: "start" | "end";
+    triggerClass?: string;
+    panelClass?: string;
+    onopen?: () => void;
+    onclose?: () => void;
+  } = $props();
   // Down a rail alone the stack is glyphs; with a tool or Work beside the
   // rail it has room to name them, as in the full column.
   const glyphs = $derived(compact && !roomy);
@@ -107,6 +125,7 @@
   class="shelf"
   data-compact={compact}
   data-glyphs={glyphs}
+  data-direction={direction}
   data-morph="profile"
   role="presentation"
   oncontextmenu={nativeMenu}
@@ -114,8 +133,12 @@
   <Disclosure
     label={name ? `${m.dock_tools()} — ${name}` : m.dock_tools()}
     menu
-    triggerClass={["case", tools.activeTool() !== null && "case-lit"].filter(Boolean).join(" ")}
-    panelClass="shelf-stack sidebar-softens"
+    {align}
+    triggerClass={triggerClass ??
+      ["case", tools.activeTool() !== null && "case-lit"].filter(Boolean).join(" ")}
+    panelClass={panelClass ?? "shelf-stack sidebar-softens"}
+    {onopen}
+    {onclose}
   >
     {#snippet trigger()}{#if foot.face}<ProfileAvatar
           view={foot.face}
@@ -290,6 +313,20 @@
 
   .shelf :global(.shelf-stack:not([data-open="true"])) {
     translate: 0 6px;
+  }
+
+  .shelf[data-direction="down"] :global(.shelf-stack) {
+    top: calc(100% + 6px);
+    bottom: auto;
+    transform-origin: top right;
+  }
+
+  .shelf[data-direction="down"] :global(.shelf-stack[data-align="start"]) {
+    transform-origin: top left;
+  }
+
+  .shelf[data-direction="down"] :global(.shelf-stack:not([data-open="true"])) {
+    translate: 0 -6px;
   }
 
   /* Who you are, and who else you could be. */
