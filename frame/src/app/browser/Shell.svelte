@@ -18,6 +18,7 @@
   import RenderBoundary from "$shared/ui/RenderBoundary";
   import { loadClearSiteData, loadSettings } from "$features/settings";
   import { EssentialTile } from "$features/essentials";
+  import FreeFavoritesGrid from "$features/essentials/components/FreeFavoritesGrid.svelte";
   import { AddressField, SiteDetails, SiteHead, findInPage } from "$features/address";
   import { SidebarPagePermission } from "$features/permissions";
   import { Dock } from "$features/dock";
@@ -596,18 +597,13 @@
               class="dock-sites"
               data-essentials-drop
               data-over={tabDrag.overEssentials()}
-              hidden={keptAbove.length === 0}
+              hidden={tree.favorites.length === 0}
             >
-              <TabList
-                entries={keptAbove}
-                section="favorites"
-                variant="essentials"
+              <FreeFavoritesGrid
+                entries={tree.favorites}
                 columns={dockColumns}
-                label={m.essentials()}
-                {splitting}
                 onSelect={selectEssential}
-                >{#snippet essentialTile(props)}<EssentialTile {...props} />{/snippet}</TabList
-              >
+              />
             </div>
           {/snippet}
           {#snippet sites()}
@@ -621,15 +617,6 @@
               {#if tree.favorites.length === 0}<span class="dock-sites-hint"
                   >{m.essential_drop_hint()}</span
                 >{/if}
-              <TabList
-                entries={keptBeside}
-                section="favorites"
-                variant="essentials"
-                label={m.essentials()}
-                {splitting}
-                onSelect={selectEssential}
-                >{#snippet essentialTile(props)}<EssentialTile {...props} />{/snippet}</TabList
-              >
             </div>
             {#if tabDrag.moveFailed()}<p class="sidebar-move-error" role="alert">
                 {m.essential_move_failed()}

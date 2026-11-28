@@ -1,9 +1,11 @@
 <script lang="ts">
   import {
     ArrowLeft01Icon,
+    ArrowLeft02Icon,
     ArrowRight01Icon,
     Cancel01Icon,
     Globe02Icon,
+    IncognitoIcon,
     PinIcon,
     PinOffIcon,
     PlusSignIcon,
@@ -19,6 +21,7 @@
   import { tabs } from "$domain/tabs";
   import { favicons } from "$domain/favicons";
   import { preferences } from "$domain/preferences";
+  import { profiles } from "$domain/profiles";
   import { updates } from "$domain/updates";
   import { commands } from "$shared/ipc/bindings";
   import { reducedMotion } from "$shared/lib/motion";
@@ -62,6 +65,8 @@
 
   let activeId = $derived(tabs.activeId());
   let activeTab = $derived(tabs.activeTab());
+  let incognito = $derived(tabs.profile()?.kind === "incognito");
+  let regularProfileName = $derived(profiles.current()?.name ?? "");
   let updateState = $derived(updates.status());
   let updateReady = $derived(updateState.state === "ready");
   let updateBusy = $derived(
@@ -395,6 +400,7 @@
   });
 
   onMount(() => {
+    void profiles.retain();
     const onTopEdge = (event: Event) => {
       if (!(event instanceof CustomEvent) || typeof event.detail?.near !== "boolean") return;
       atEdge = event.detail.near;
@@ -417,6 +423,7 @@
     window.addEventListener("blur", onBlur);
     document.documentElement.addEventListener("mouseleave", onLeaveDoc);
     return () => {
+      profiles.release();
       window.removeEventListener("zephium:topbar-edge", onTopEdge);
       window.removeEventListener("blur", onBlur);
       document.documentElement.removeEventListener("mouseleave", onLeaveDoc);
@@ -827,7 +834,38 @@
     </div>
   </div>
 
-  <!-- Row 3: Classic Bookmarks / Favorites Bar (drop tabs here to pin; drag to reorder; click=current tab, middle-click=new tab) -->
+  <!-- Row 3: Incognito Controls OR Classic Bookmarks / Favorites Bar -->
+  {#if incognito}
+    <div class="topbar-private-row" role="group" aria-label={m.private_title()}>
+      <span class="topbar-private-badge">
+        <Icon icon={IncognitoIcon} size={14} />
+        <span>{m.private_title()}</span>
+      </span>
+      <span class="topbar-private-hint">{m.private_explain()}</span>
+      <div class="topbar-private-actions">
+        {#if regularProfileName}
+          <button
+            type="button"
+            class="topbar-private-btn"
+            title={m.private_back_hint({ name: regularProfileName })}
+            onclick={() => void commands.runCommand("window.showRegular").catch(() => {})}
+          >
+            <Icon icon={ArrowLeft02Icon} size={13} />
+            <span>{m.private_back({ name: regularProfileName })}</span>
+          </button>
+        {/if}
+        <button
+          type="button"
+          class="topbar-private-btn topbar-private-btn-danger"
+          title={m.private_close_hint()}
+          onclick={() => void commands.runCommand("window.closePrivate").catch(() => {})}
+        >
+          <Icon icon={Cancel01Icon} size={13} />
+          <span>{m.private_close()}</span>
+        </button>
+      </div>
+    </div>
+  {:else}
   <div
     bind:this={bookmarksEl}
     class="topbar-bookmarks-row"
@@ -880,6 +918,7 @@
       {/each}
     {/if}
   </div>
+  {/if}
 </header>
 
 {#if drag.ghost !== null}
@@ -1310,5 +1349,75 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  .topbar-private-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    height: 28px;
+    padding-inline: 6px;
+    border-radius: 8px;
+    background: rgba(139, 92, 246, 0.14);
+    border: 1px solid rgba(139, 92, 246, 0.28);
+  }
+
+  .topbar-private-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 12px;
+    font-weight: 600;
+    color: #e9d5ff;
+    white-space: nowrap;
+  }
+
+  .topbar-private-hint {
+    font-size: 11.5px;
+    color: rgba(226, 232, 240, 0.72);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+  }
+
+  .topbar-private-actions {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-inline-start: auto;
+    flex: none;
+  }
+
+  .topbar-private-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    height: 22px;
+    padding: 0 9px;
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    border-radius: 7px;
+    background: rgba(255, 255, 255, 0.08);
+    color: #f8fafc;
+    font-size: 11.5px;
+    font-weight: 550;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background-color 110ms ease, border-color 110ms ease;
+  }
+
+  .topbar-private-btn:hover {
+    background: rgba(255, 255, 255, 0.16);
+  }
+
+  .topbar-private-btn-danger {
+    border-color: rgba(248, 113, 113, 0.35);
+    background: rgba(239, 68, 68, 0.18);
+    color: #fecaca;
+  }
+
+  .topbar-private-btn-danger:hover {
+    background: rgba(239, 68, 68, 0.32);
+    color: #fff;
   }
 </style>

@@ -28,6 +28,12 @@
   });
   // A seek holds its place until native reports the next state.
   let sought = $state.raw<{ for: object; seconds: number } | null>(null);
+  let overridePlaying = $state.raw<{ for: object; playing: boolean } | null>(null);
+  let isPlaying = $derived(
+    overridePlaying && overridePlaying.for === player
+      ? overridePlaying.playing
+      : (player?.playing ?? false),
+  );
   let position = $derived(
     sought && sought.for === player ? sought.seconds : mediaPlayer.position(now),
   );
@@ -61,8 +67,11 @@
   }
 
   function toggle() {
-    if (player?.playing) mediaPlayer.pause();
-    else mediaPlayer.play();
+    if (!player) return;
+    const next = !isPlaying;
+    overridePlaying = { for: player, playing: next };
+    if (next) mediaPlayer.play();
+    else mediaPlayer.pause();
   }
 
   function seek(event: Event) {
@@ -138,9 +147,9 @@
     <button
       type="button"
       class="media-disc"
-      data-playing={player.playing || undefined}
+      data-playing={isPlaying || undefined}
       title={player.title}
-      aria-label={`${player.playing ? m.media_pause() : m.media_play()}: ${player.title}`}
+      aria-label={`${isPlaying ? m.media_pause() : m.media_play()}: ${player.title}`}
       onclick={toggle}
     >
       <svg class="media-ring" viewBox="0 0 36 36" aria-hidden="true">
@@ -163,14 +172,14 @@
           lit
         />
       </span>
-      <span class="media-disc-glyph">{@render playGlyph(player.playing, 14)}</span>
+      <span class="media-disc-glyph">{@render playGlyph(isPlaying, 14)}</span>
     </button>
   {:else}
     <section
       class="media-player"
       aria-label={m.media_player()}
       data-expanded={expanded || undefined}
-      data-playing={player.playing || undefined}
+      data-playing={isPlaying || undefined}
       onpointerenter={() => (hovered = true)}
       onpointerleave={() => (hovered = false)}
       onfocusin={() => (focused = true)}
@@ -207,11 +216,11 @@
         <button
           type="button"
           class="media-control media-toggle"
-          aria-label={player.playing ? m.media_pause() : m.media_play()}
-          title={player.playing ? m.media_pause() : m.media_play()}
+          aria-label={isPlaying ? m.media_pause() : m.media_play()}
+          title={isPlaying ? m.media_pause() : m.media_play()}
           onclick={toggle}
         >
-          {@render playGlyph(player.playing, 14)}
+          {@render playGlyph(isPlaying, 14)}
         </button>
         {#if player.can_mute}
           {@const displayVol = player.muted ? 0 : volume}

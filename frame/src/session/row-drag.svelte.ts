@@ -172,9 +172,12 @@ export class RowDrag {
       this.#dragging = true;
       tabDrag.begin(this.#id);
       document.body.style.cursor = "grabbing";
-      const sidebar = target instanceof Element ? target.closest(".browser-sidebar") : null;
-      this.#bounds = sidebar?.getBoundingClientRect() ?? null;
-      this.#floating = sidebar?.hasAttribute("data-hidden") ?? false;
+      const host =
+        target instanceof Element ? target.closest(".browser-sidebar, .aether-topbar") : null;
+      this.#bounds = host?.getBoundingClientRect() ?? null;
+      this.#floating =
+        host !== null &&
+        (host.classList.contains("aether-topbar") || host.hasAttribute("data-hidden"));
       this.#native = false;
       this.#slot = -1;
       this.#page = false;

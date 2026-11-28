@@ -7,8 +7,8 @@
   },
   "browser-panel-mini": {
     "browser": {
-      "js": 567085,
-      "css": 175844
+      "js": 570793,
+      "css": 177768
     },
     "lazy:app/browser/WorkWorkspace.svelte": {
       "js": 43787,
@@ -71,7 +71,7 @@
       "css": 0
     },
     "lazy:features/media/components/MediaPlayer.svelte": {
-      "js": 11304,
+      "js": 11370,
       "css": 9621
     },
     "lazy:features/newtab/components/CustomBackground.svelte": {
@@ -143,7 +143,7 @@
       "css": 2383
     },
     "lazy:features/settings/components/sections/AccountPage.svelte": {
-      "js": 71402,
+      "js": 71403,
       "css": 19489
     },
     "lazy:features/settings/components/sections/AiPage.svelte": {

@@ -171,9 +171,25 @@ pub(super) const MEDIA_ACTION_JS: &str = r#"(async (action, value) => {
   try {
     const el = choose(documents());
     if (!el) return false;
-    if (action === 'play') await el.play();
-    else if (action === 'pause') el.pause();
-    else if (action === 'seek') {
+    if (action === 'play') {
+      try {
+        await el.play();
+      } catch (_) {
+        try {
+          if (el.paused) { el.muted = false; await el.play(); }
+        } catch (_) {}
+      }
+      if (el.paused) {
+        try {
+          const btn = document.querySelector('button[aria-label*="Play" i], button[data-testid*="play" i]');
+          if (btn) btn.click();
+        } catch (_) {}
+      }
+      try { el.dispatchEvent(new Event('playing')); } catch (_) {}
+    } else if (action === 'pause') {
+      el.pause();
+      try { el.dispatchEvent(new Event('pause')); } catch (_) {}
+    } else if (action === 'seek') {
       if (!isFinite(el.duration)) return false;
       el.currentTime = Math.min(Math.max(0, value), el.duration);
     } else if (action === 'volume') {
